@@ -54,16 +54,9 @@ SESSION_TTL = int(os.getenv("SESSION_TTL", "1800"))
 DIRECT_MINIAPP = _bool("DIRECT_MINIAPP", False)
 MINIAPP_SHORT_NAME = os.getenv("MINIAPP_SHORT_NAME", "").strip()
 
-# ---- Monetag ----
-# MAIN zone ID (sub-zone nahi), Monetag dashboard -> Get SDK
-MONETAG_ZONE_ID = os.getenv("MONETAG_ZONE_ID", "").strip()
-# Dashboard ke "Get instructions" snippet me jo <script src="..."> hai, wahi daalo
-MONETAG_SDK_URL = os.getenv("MONETAG_SDK_URL", "https://libtl.com/sdk.js").strip()
-# True = reward sirf tab jab Monetag 'valued' bheje (user ne ad poora dekha)
-MONETAG_REQUIRE_VALUED = _bool("MONETAG_REQUIRE_VALUED", True)
-
-if ROLE in ("worker", "both") and VERIFY_REQUIRED and not MONETAG_ZONE_ID:
-    raise RuntimeError(
-        "VERIFY_REQUIRED=true but MONETAG_ZONE_ID is not set. "
-        "Set the zone ID or set VERIFY_REQUIRED=false."
-    )
+# ---- TADS (tads.me) ----
+# Dashboard -> Widgets -> FULLSCREEN widget ka ID
+TADS_WIDGET_ID = int(os.getenv("TADS_WIDGET_ID", "13070"))
+TADS_SDK_URL = os.getenv("TADS_SDK_URL", "https://w.tads.me/widget.js").strip()
+# True = dev mode (asli ads nahi, data collect nahi). Production me False.
+TADS_DEBUG = _bool("TADS_DEBUG", False)
