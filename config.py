@@ -46,6 +46,9 @@ ADS_REQUIRED = int(os.getenv("ADS_REQUIRED", "1"))
 MIN_AD_SECONDS = int(os.getenv("MIN_AD_SECONDS", "5"))
 SESSION_TTL = int(os.getenv("SESSION_TTL", "1800"))
 
+# Delivered file itne second baad user ki chat se auto-delete (0 = band)
+AUTO_DELETE_SECONDS = int(os.getenv("AUTO_DELETE_SECONDS", "120"))
+
 # ---- direct Mini App launch ----
 # False (default) = link -> bot -> 'Verify & Get Video' button -> Mini App me turant ad.
 # True = link seedha Mini App kholta hai (button nahi).
