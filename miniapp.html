@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>File</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<!--TADS_TAG-->
+<!--AD_TAG-->
 <style>
   :root {
     --bg: var(--tg-theme-bg-color, #f3f0ea);
@@ -116,33 +116,20 @@ async function api(path) {
   return r.json();
 }
 
-// TADS widget (window.tads) aane tak wait
-function waitForTads(ms) {
+// Monetag SDK: script load hone par window.show_<ZONE> function ban jaata hai
+const SHOW_FN = "show_" + CFG.zoneId;
+function waitForSdk(ms) {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     (function check() {
-      if (window.tads && typeof window.tads.init === "function") return resolve(window.tads);
-      if (Date.now() - t0 > ms) return reject(new Error("tads missing"));
+      if (typeof window[SHOW_FN] === "function") return resolve(window[SHOW_FN]);
+      if (Date.now() - t0 > ms) return reject(new Error("sdk missing"));
       setTimeout(check, 100);
     })();
   });
 }
 
-let controller = null;
-let rewardFired = false, rewardAt = 0;
-let seenOverlay = false, adClosedAt = 0, claimed = false;
-let pollTimer = null, adStartedAt = 0;
-let bodyBefore = new Set();
-let overlayNodes = new Set();
-
-const FALLBACK_MS = 12000;   // overlay detect na ho to reward ke itne ms baad claim
-const HARD_CAP_MS = 90000;   // overlay band na ho to bhi itne ms baad claim
-
-function nodeAlive(n) {
-  if (!n.isConnected || n.hidden) return false;
-  const cs = getComputedStyle(n);
-  return cs.display !== "none" && cs.visibility !== "hidden";
-}
+let claimed = false, adRunning = false, adStartedAt = 0, watchdog = null;
 
 const LOG = [];
 function log(msg) {
@@ -155,98 +142,60 @@ function log(msg) {
   }
 }
 
-function pollAd() {
-  if (claimed) return;
-  // naya aaya ad-overlay (body ke naye children) track karo
-  for (const n of document.body.children) {
-    if (!bodyBefore.has(n) && n.nodeType === 1 && n.tagName !== "SCRIPT" && n.tagName !== "STYLE") {
-      overlayNodes.add(n);
-      if (!seenOverlay) log("overlay appeared <" + n.tagName.toLowerCase() + ">");
-      seenOverlay = true;
-    }
-  }
-  const alive = [...overlayNodes].some(nodeAlive);
-  if (seenOverlay && !alive && !adClosedAt) { adClosedAt = Date.now(); log("overlay closed"); }
-  if (seenOverlay && alive) adClosedAt = 0;
-
-  const now = Date.now();
-  if (rewardFired) {
-    const minOk = now - adStartedAt >= (CFG.minWatch || 0) * 1000;
-    const overlayDone = seenOverlay && adClosedAt && now - adClosedAt > 600;
-    const noOverlayFallback = !seenOverlay && now - rewardAt >= FALLBACK_MS;
-    const cap = now - rewardAt >= HARD_CAP_MS;
-    if (((overlayDone || noOverlayFallback) && minOk) || cap) { log("claim (overlay=" + seenOverlay + ")"); finishAd(); return; }
-  } else if (seenOverlay && adClosedAt && now - adClosedAt > 3000) {
-    // ad band ho gaya par reward nahi aaya = user ne beech me band kiya
-    stopPoll();
-    fail("Please watch the full ad to get your file.");
-    $("watch").hidden = false;
-  } else if (!seenOverlay && adStartedAt && now - adStartedAt > 8000) {
-    // 8 sec me koi ad nahi dikha -> user tap karke dekhe
-    stopPoll();
-    setIcon("stop");
-    setStatus("Tap the button to watch the ad.");
-    $("watch").hidden = false;
-  }
-}
-function stopPoll() { clearInterval(pollTimer); pollTimer = null; }
-function finishAd() {
-  stopPoll();
-  if (claimed) return;
-  claimed = true;
-  claim();
+function errText(e) {
+  if (!e) return "";
+  if (typeof e === "string") return e;
+  return e.message || e.error || e.reason || (function () { try { return JSON.stringify(e); } catch (_) { return ""; } })();
 }
 
-function getController() {
-  if (controller) return controller;
-  controller = window.tads.init({
-    widgetId: CFG.widgetId,
-    type: "fullscreen",
-    debug: CFG.debug,
-    // reward ad ke beech me bhi aa sakta hai: yahan sirf note karo, claim ad band hone par hoga
-    onShowReward: () => {
-      if (!rewardFired) { rewardFired = true; rewardAt = Date.now(); log("onShowReward"); }
-    },
-    onAdsNotFound: () => {
-      stopPoll();
-      fail("No ad is available right now. Please try again in a minute.");
-    },
-  });
-  return controller;
-}
-
-function playAd() {
-  let c;
-  try { c = getController(); }
-  catch (e) { fail("Ad setup failed. Please try again shortly."); return; }
-
+function playAd(show) {
+  if (adRunning) return;
+  adRunning = true; claimed = false;
   $("watch").hidden = true;
   setIcon("");
   setStatus("");
-  rewardFired = false; seenOverlay = false; adClosedAt = 0; claimed = false;
-  overlayNodes = new Set();
-  bodyBefore = new Set(document.body.children);
   adStartedAt = Date.now();
-  log("showAd() called");
-  stopPoll();
-  pollTimer = setInterval(pollAd, 400);
+  log("show() called, zone " + CFG.zoneId);
 
-  c.showAd().catch((e) => {
-    stopPoll();
-    const why = e && (e.message || (typeof e === "string" ? e : ""));
-    fail("No ad could be shown right now" + (why ? " (" + String(why).slice(0, 60) + ")" : "") + ". Please try again shortly.");
+  // ad kabhi respond hi na kare to user atka na rahe
+  clearTimeout(watchdog);
+  watchdog = setTimeout(() => {
+    if (claimed) return;
+    adRunning = false;
+    log("watchdog: no response");
+    fail("The ad didn't respond. Please try again.");
+  }, 60000);
+
+  let p;
+  try { p = show({ ymid: sid }); }
+  catch (e) { clearTimeout(watchdog); adRunning = false; log("throw " + errText(e)); fail("Ad setup failed. Please try again shortly."); return; }
+
+  Promise.resolve(p).then(() => {
+    // rewarded interstitial: ye tabhi resolve hota hai jab user ne ad dekh liya
+    log("ad watched (resolved)");
+    clearTimeout(watchdog);
+    adRunning = false;
+    if (claimed) return;
+    claimed = true;
+    claim();
+  }).catch((e) => {
+    clearTimeout(watchdog);
+    adRunning = false;
+    const why = errText(e);
+    log("rejected: " + why);
+    fail("No ad could be shown right now" + (CFG.showLog && why ? " (" + String(why).slice(0, 80) + ")" : "") + ". Please try again shortly.");
   });
 }
 
 async function startAd(sdkP) {
-  const tads = await sdkP;
-  if (!tads) {
+  const show = await sdkP;
+  if (!show) {
     if (window.__sdkErr) fail("The ad script was blocked. Turn off AdBlock / Private DNS and try again.");
     else fail("The ad script didn't load. Please check your connection and try again.");
     return;
   }
-  $("watch").onclick = playAd;
-  playAd();                         // seedha ad chalao, koi extra button nahi
+  $("watch").onclick = () => playAd(show);
+  playAd(show);                     // seedha ad chalao, koi extra button nahi
 }
 
 async function claim() {
@@ -299,7 +248,7 @@ async function begin() {
   if (!tg.initData) { fail("Please open this inside Telegram."); return; }
   setStatus("");
 
-  const sdkP = waitForTads(10000).catch(() => null);   // session start ke saath hi SDK load
+  const sdkP = waitForSdk(10000).catch(() => null);   // session start ke saath hi SDK load
   let s;
   try { s = await api("/api/ad/start"); }
   catch (e) { fail("Network error. Please try again."); return; }
