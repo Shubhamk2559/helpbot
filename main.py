@@ -25,11 +25,9 @@ from config import (
     MINIAPP_SHORT_NAME,
     MIN_AD_SECONDS,
     ROLE,
-    TADS_DEBUG,
-    TADS_MIN_WATCH_SECONDS,
-    TADS_SDK_URL,
-    TADS_SHOW_LOG,
-    TADS_WIDGET_ID,
+    MONETAG_SDK_URL,
+    MONETAG_SHOW_LOG,
+    MONETAG_ZONE_ID,
 )
 from delivery import send_file
 from manager import BotManager
@@ -136,16 +134,16 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = 3600):
 if ROLE in ("worker", "both"):
     _CFG = json.dumps(
         {
-            "widgetId": TADS_WIDGET_ID,
-            "debug": TADS_DEBUG,
-            "minWatch": TADS_MIN_WATCH_SECONDS,
-            "showLog": TADS_SHOW_LOG,
+            "zoneId": MONETAG_ZONE_ID,
+            "showLog": MONETAG_SHOW_LOG,
             "required": ADS_REQUIRED,
         }
     ).replace("</", "<\\/")
 
     _TAG = (
-        f'<script src="{html.escape(TADS_SDK_URL, quote=True)}" '
+        f'<script src="{html.escape(MONETAG_SDK_URL, quote=True)}" '
+        f'data-zone="{html.escape(MONETAG_ZONE_ID, quote=True)}" '
+        f'data-sdk="show_{html.escape(MONETAG_ZONE_ID, quote=True)}" '
         f'onerror="window.__sdkErr=1"></script>'
     )
 
@@ -154,7 +152,7 @@ if ROLE in ("worker", "both"):
         .with_name("miniapp.html")
         .read_text(encoding="utf-8")
         .replace("__CFG__", _CFG)
-        .replace("<!--TADS_TAG-->", _TAG)
+        .replace("<!--AD_TAG-->", _TAG)
     )
 
     @app.get("/app", response_class=HTMLResponse)
