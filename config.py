@@ -60,3 +60,7 @@ TADS_WIDGET_ID = int(os.getenv("TADS_WIDGET_ID", "13070"))
 TADS_SDK_URL = os.getenv("TADS_SDK_URL", "https://w.tads.me/widget.js").strip()
 # True = dev mode (asli ads nahi, data collect nahi). Production me False.
 TADS_DEBUG = _bool("TADS_DEBUG", False)
+# Ad shuru hone ke baad kam se kam itne second ruko, tab hi file do (reward jaldi aa jaye to bhi)
+TADS_MIN_WATCH_SECONDS = int(os.getenv("TADS_MIN_WATCH_SECONDS", "15"))
+# True = Mini App me chhota event log dikhao (sirf test ke liye)
+TADS_SHOW_LOG = _bool("TADS_SHOW_LOG", False)
