@@ -54,13 +54,9 @@ SESSION_TTL = int(os.getenv("SESSION_TTL", "1800"))
 DIRECT_MINIAPP = _bool("DIRECT_MINIAPP", False)
 MINIAPP_SHORT_NAME = os.getenv("MINIAPP_SHORT_NAME", "").strip()
 
-# ---- TADS (tads.me) ----
-# Dashboard -> Widgets -> FULLSCREEN widget ka ID
-TADS_WIDGET_ID = int(os.getenv("TADS_WIDGET_ID", "13070"))
-TADS_SDK_URL = os.getenv("TADS_SDK_URL", "https://w.tads.me/widget.js").strip()
-# True = dev mode (asli ads nahi, data collect nahi). Production me False.
-TADS_DEBUG = _bool("TADS_DEBUG", False)
-# Ad shuru hone ke baad kam se kam itne second ruko, tab hi file do (reward jaldi aa jaye to bhi)
-TADS_MIN_WATCH_SECONDS = int(os.getenv("TADS_MIN_WATCH_SECONDS", "15"))
-# True = Mini App me chhota event log dikhao (sirf test ke liye)
-TADS_SHOW_LOG = _bool("TADS_SHOW_LOG", False)
+# ---- Monetag (Rewarded Interstitial, Telegram Mini App SDK) ----
+# Monetag dashboard -> Telegram Mini Apps -> apna zone ID
+MONETAG_ZONE_ID = os.getenv("MONETAG_ZONE_ID", "12181474").strip()
+MONETAG_SDK_URL = os.getenv("MONETAG_SDK_URL", "https://libtl.com/sdk.js").strip()
+# True = Mini App me chhota event log + asli error dikhao (sirf test ke liye)
+MONETAG_SHOW_LOG = _bool("MONETAG_SHOW_LOG", False)
