@@ -96,7 +96,7 @@ async def delete_file(token: str):
 
 
 # ---------- verification sessions ----------
-async def create_session(sid, token, user_id, chat_id, bot_id, required):
+async def create_session(sid, token, user_id, chat_id, bot_id, required, prompt_msg=None):
     await sessions.insert_one(
         {
             "sid": sid,
@@ -108,6 +108,7 @@ async def create_session(sid, token, user_id, chat_id, bot_id, required):
             "ads_required": required,
             "ad_started_at": None,
             "delivered": False,
+            "prompt_msg": prompt_msg,
             "created": datetime.now(timezone.utc),
         }
     )
