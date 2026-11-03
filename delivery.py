@@ -39,12 +39,10 @@ def _with_warning(caption: str) -> str:
     return warn
 
 
-async def send_file(bot, chat_id: int, doc: dict, manager) -> bool:
-    caption = _with_warning(doc.get("caption") or "")
-    token = doc["token"]
-    kb = _after_kb(token)
-
-    for loc in doc["locations"]:
+async def _send_item(bot, chat_id: int, item: dict, token: str, kb, manager) -> bool:
+    """Ek video/file (item) chat me bhejo: primary channel, na chale to backup."""
+    caption = _with_warning(item.get("caption") or "")
+    for loc in item["locations"]:
         for _attempt in range(2):
             try:
                 sent = await bot.copy_message(
@@ -73,3 +71,22 @@ async def send_file(bot, chat_id: int, doc: dict, manager) -> bool:
                 )
                 break
     return False
+
+
+async def send_file(bot, chat_id: int, doc: dict, manager) -> bool:
+    token = doc["token"]
+    kb = _after_kb(token)
+    items = doc.get("items") or [doc]   # post = kai videos, normal file = ek
+    delivered = 0
+    for i, item in enumerate(items):
+        last = i == len(items) - 1
+        if await _send_item(bot, chat_id, item, token, kb if last else None, manager):
+            delivered += 1
+        if not last:
+            await asyncio.sleep(0.4)
+    if delivered:
+        try:
+            await db.record_view(token)
+        except Exception:  # noqa: BLE001
+            log.exception("record_view failed token=%s", token)
+    return delivered > 0
