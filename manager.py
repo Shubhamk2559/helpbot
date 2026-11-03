@@ -6,12 +6,13 @@ import time
 
 from cryptography.fernet import Fernet
 from telegram import Bot
-from telegram.error import InvalidToken, TelegramError
+from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter, TelegramError
 from telegram.ext import Application
 
 import db
 import handlers
 from config import (
+    AUTO_DELETE_SECONDS,
     BASE_URL,
     CHANNELS,
     FERNET_KEY,
@@ -108,11 +109,46 @@ class BotManager:
         if ROLE == "main":
             return self.health_loop()
         if ROLE == "worker":
-            return self.sync_loop()
+            return self._worker_loops()
         return self._both_loops()
 
+    async def _worker_loops(self):
+        await asyncio.gather(self.sync_loop(), self.cleanup_loop())
+
     async def _both_loops(self):
-        await asyncio.gather(self.health_loop(), self.sync_loop())
+        await asyncio.gather(self.health_loop(), self.sync_loop(), self.cleanup_loop())
+
+    # ---------- auto-delete delivered files ----------
+    async def cleanup_loop(self):
+        if AUTO_DELETE_SECONDS <= 0:
+            return
+        while True:
+            try:
+                await self.cleanup_once()
+            except Exception:  # noqa: BLE001
+                log.exception("cleanup error")
+            await asyncio.sleep(10)
+
+    async def cleanup_once(self):
+        now = time.time()
+        for d in await db.due_deletes(now, 100):
+            app = next((a for a in list(self.apps.values()) if a.bot.id == d["bot_id"]), None)
+            overdue = now - d["delete_at"] > 3600
+            if not app:
+                if overdue:
+                    await db.remove_delete(d["_id"])
+                continue
+            try:
+                await app.bot.delete_message(d["chat_id"], d["message_id"])
+            except RetryAfter:
+                return
+            except (BadRequest, Forbidden):
+                pass  # pehle hi delete ho chuka / ab delete nahi ho sakta
+            except TelegramError as e:
+                log.warning("auto-delete failed: %s", e)
+                if not overdue:
+                    continue
+            await db.remove_delete(d["_id"])
 
     async def refresh(self):
         """Single-service mode: bot add/enable/disable ke turant baad naye bots live karo."""
