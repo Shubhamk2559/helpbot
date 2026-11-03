@@ -12,6 +12,7 @@ _db = _client[DB_NAME]
 bots = _db.bots
 files = _db.files
 sessions = _db.sessions
+pending_deletes = _db.pending_deletes
 
 
 async def init():
@@ -20,6 +21,7 @@ async def init():
     await files.create_index("token", unique=True)
     await sessions.create_index("sid", unique=True)
     await sessions.create_index("created", expireAfterSeconds=SESSION_TTL)
+    await pending_deletes.create_index("delete_at")
 
 
 # ---------- bots registry ----------
@@ -148,3 +150,18 @@ async def claim_delivery(sid: str) -> bool:
 
 async def unclaim_delivery(sid: str):
     await sessions.update_one({"sid": sid}, {"$set": {"delivered": False}})
+
+
+# ---------- auto-delete of delivered files ----------
+async def schedule_delete(bot_id: int, chat_id: int, message_id: int, delete_at: float):
+    await pending_deletes.insert_one(
+        {"bot_id": bot_id, "chat_id": chat_id, "message_id": message_id, "delete_at": delete_at}
+    )
+
+
+async def due_deletes(now: float, limit: int = 100):
+    return await pending_deletes.find({"delete_at": {"$lte": now}}).limit(limit).to_list(length=limit)
+
+
+async def remove_delete(_id):
+    await pending_deletes.delete_one({"_id": _id})
