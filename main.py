@@ -26,7 +26,9 @@ from config import (
     MIN_AD_SECONDS,
     ROLE,
     TADS_DEBUG,
+    TADS_MIN_WATCH_SECONDS,
     TADS_SDK_URL,
+    TADS_SHOW_LOG,
     TADS_WIDGET_ID,
 )
 from delivery import send_file
@@ -136,6 +138,8 @@ if ROLE in ("worker", "both"):
         {
             "widgetId": TADS_WIDGET_ID,
             "debug": TADS_DEBUG,
+            "minWatch": TADS_MIN_WATCH_SECONDS,
+            "showLog": TADS_SHOW_LOG,
             "required": ADS_REQUIRED,
         }
     ).replace("</", "<\\/")
