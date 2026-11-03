@@ -63,3 +63,17 @@ MONETAG_ZONE_ID = os.getenv("MONETAG_ZONE_ID", "12181474").strip()
 MONETAG_SDK_URL = os.getenv("MONETAG_SDK_URL", "https://libtl.com/sdk.js").strip()
 # True = Mini App me chhota event log + asli error dikhao (sirf test ke liye)
 MONETAG_SHOW_LOG = _bool("MONETAG_SHOW_LOG", False)
+
+# ---- Create Post (manager bot) ----
+# Post ka default caption (image ke niche). \n se nayi line. Owner photo ke saath caption likhe to wahi use hota hai.
+POST_CAPTION = os.getenv(
+    "POST_CAPTION",
+    "🎬 Watch this video for FREE!\n\n▶️ Tap the button below to play instantly",
+).replace("\\n", "\n")
+POST_BUTTON_TEXT = os.getenv("POST_BUTTON_TEXT", "👉 Play Online Free").strip()[:60] or "Play"
+# Optional: channel jaha bot post seedha daal de (bot ko us channel ka admin banao). Khali = band.
+_pc = os.getenv("POST_CHANNEL", "").strip()
+POST_CHANNEL = (int(_pc) if _pc.lstrip("-").isdigit() else _pc) if _pc else None
+POST_MAX_VIDEOS = int(os.getenv("POST_MAX_VIDEOS", "10"))
+# "Aaj" ka din kis timezone me ginna hai (minutes, UTC se). India = 330
+STATS_TZ_OFFSET_MIN = int(os.getenv("STATS_TZ_OFFSET_MIN", "330"))
