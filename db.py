@@ -1,11 +1,11 @@
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ReturnDocument
 
-from config import DB_NAME, MONGO_URI, SESSION_TTL
+from config import DB_NAME, MONGO_URI, SESSION_TTL, STATS_TZ_OFFSET_MIN
 
 _client = AsyncIOMotorClient(MONGO_URI)
 _db = _client[DB_NAME]
@@ -13,6 +13,7 @@ bots = _db.bots
 files = _db.files
 sessions = _db.sessions
 pending_deletes = _db.pending_deletes
+stats = _db.stats
 
 
 async def init():
@@ -22,6 +23,7 @@ async def init():
     await sessions.create_index("sid", unique=True)
     await sessions.create_index("created", expireAfterSeconds=SESSION_TTL)
     await pending_deletes.create_index("delete_at")
+    await stats.create_index("day", unique=True)
 
 
 # ---------- bots registry ----------
@@ -166,3 +168,48 @@ async def due_deletes(now: float, limit: int = 100):
 
 async def remove_delete(_id):
     await pending_deletes.delete_one({"_id": _id})
+
+
+# ---------- posts (image + multiple videos behind one link) ----------
+async def save_post(token: str, items: list, post_caption: str, photo: str):
+    await files.insert_one(
+        {
+            "token": token,
+            "kind": "post",
+            "items": items,  # [{"locations": [...], "caption": str}, ...]
+            "locations": [],
+            "caption": f"📝 Post • {len(items)} video{'s' if len(items) != 1 else ''}",
+            "post_caption": post_caption,
+            "photo": photo,
+            "views": 0,
+            "created_at": time.time(),
+        }
+    )
+
+
+# ---------- views (jitni baar file/videos user ko mile) ----------
+def _day(offset_days: int = 0) -> str:
+    now = datetime.now(timezone.utc) + timedelta(minutes=STATS_TZ_OFFSET_MIN)
+    return (now - timedelta(days=offset_days)).strftime("%Y-%m-%d")
+
+
+async def record_view(token: str):
+    await stats.update_one({"day": _day()}, {"$inc": {"views": 1}}, upsert=True)
+    await files.update_one({"token": token}, {"$inc": {"views": 1}})
+
+
+async def views_today() -> int:
+    d = await stats.find_one({"day": _day()})
+    return int(d.get("views", 0)) if d else 0
+
+
+async def views_total() -> int:
+    r = await stats.aggregate([{"$group": {"_id": None, "t": {"$sum": "$views"}}}]).to_list(length=1)
+    return int(r[0]["t"]) if r else 0
+
+
+async def views_last_days(n: int = 7) -> list:
+    wanted = [_day(i) for i in range(n)]
+    docs = await stats.find({"day": {"$in": wanted}}).to_list(length=n)
+    by_day = {d["day"]: int(d.get("views", 0)) for d in docs}
+    return [(d, by_day.get(d, 0)) for d in wanted]
