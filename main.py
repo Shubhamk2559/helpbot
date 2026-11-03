@@ -262,6 +262,14 @@ if ROLE in ("worker", "both"):
         if not ok:
             await db.unclaim_delivery(s["sid"])
             return {"ok": False, "error": "The file is unavailable right now. Please retry shortly."}
+
+        # ad verify ho gaya: "Almost there! Verify & Get Video" wala message hata do
+        prompt_msg = s2.get("prompt_msg")
+        if prompt_msg:
+            try:
+                await application.bot.delete_message(s2["chat_id"], prompt_msg)
+            except TelegramError:
+                pass
         return {
             "ok": True,
             "delivered": True,
