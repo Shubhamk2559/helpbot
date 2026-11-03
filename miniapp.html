@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>File</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src='//libtl.com/sdk.js' data-zone='12181474' data-sdk='show_12181474'></script>
+<!--TADS_TAG-->
 <style>
   :root {
     --bg: var(--tg-theme-bg-color, #f3f0ea);
@@ -71,6 +71,7 @@
   </div>
   <p id="status">Getting ready…</p>
   <p id="progress"></p>
+  <button class="btn solid" id="watch" hidden>▶ Watch ad &amp; get file</button>
   <button class="btn" id="retry" hidden>Try again</button>
   <button class="btn solid" id="openbot" hidden>Open bot</button>
 </main>
@@ -115,55 +116,70 @@ async function api(path) {
   return r.json();
 }
 
-// Monetag SDK ka global function (show_<zoneId>) aane tak wait
-function waitForSdk(name, ms) {
+// TADS widget (window.tads) aane tak wait
+function waitForTads(ms) {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     (function check() {
-      if (typeof window[name] === "function") return resolve(window[name]);
-      if (Date.now() - t0 > ms) return reject(new Error("sdk missing"));
+      if (window.tads && typeof window.tads.init === "function") return resolve(window.tads);
+      if (Date.now() - t0 > ms) return reject(new Error("tads missing"));
       setTimeout(check, 100);
     })();
   });
 }
 
+let controller = null;
+let watchdog = null;
+
+function getController() {
+  if (controller) return controller;
+  controller = window.tads.init({
+    widgetId: CFG.widgetId,
+    type: "fullscreen",
+    debug: CFG.debug,
+    // user ne poora ad dekha -> reward
+    onShowReward: () => {
+      clearTimeout(watchdog);
+      if (!rewarded) { rewarded = true; claim(); }
+    },
+    // abhi koi ad available nahi
+    onAdsNotFound: () => {
+      clearTimeout(watchdog);
+      fail("No ad is available right now. Please try again in a minute.");
+    },
+  });
+  return controller;
+}
+
 async function startAd(sdkP) {
-  const show = await sdkP;
-  if (!show) {
-    if (!CFG.zone) fail("Ads aren't set up yet (Monetag zone ID is missing on the server).");
-    else if (window.__sdkErr) fail("The ad script was blocked. Turn off AdBlock / Private DNS and try again.");
-    else fail("The ad script loaded but zone " + CFG.zone + " isn't responding. Check the zone ID and SDK URL.");
+  const tads = await sdkP;
+  if (!tads) {
+    if (window.__sdkErr) fail("The ad script was blocked. Turn off AdBlock / Private DNS and try again.");
+    else fail("The ad script didn't load. Please check your connection and try again.");
     return;
   }
+  let c;
+  try { c = getController(); }
+  catch (e) { fail("Ad setup failed. Please try again shortly."); return; }
 
-  setStatus("Loading ad…");
-  try {                                   // preload so the ad appears instantly when shown
-    const pre = show({ type: "preload", ymid: sid });
-    if (pre && typeof pre.then === "function") {
-      await Promise.race([pre, new Promise((r) => setTimeout(r, 8000))]);
-    }
-  } catch (e) { /* preload unsupported or no ad yet: try showing directly */ }
-
-  setStatus("Playing ad…");
-  const watchdog = setTimeout(() => {
-    if (!rewarded) fail("The ad didn't appear. Please try again, or try later if it keeps happening.");
-  }, 60000);
-
-  show({ ymid: sid })
-    .then((res) => {
+  setIcon("stop");
+  setStatus("Tap the button and watch the ad to get your file.");
+  const w = $("watch");
+  w.hidden = false;
+  w.onclick = () => {
+    w.hidden = true;
+    setIcon("");
+    setStatus("Loading ad…");
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => {
+      if (!rewarded) fail("Please watch the full ad to get your file.");
+    }, 120000);
+    c.showAd().catch((e) => {
       clearTimeout(watchdog);
-      // the promise also resolves if the user closes the ad early, so only 'valued' counts as a reward
-      if (CFG.requireValued && !(res && res.reward_event_type === "valued")) {
-        fail("Please watch the full ad to get your file.");
-        return;
-      }
-      if (!rewarded) { rewarded = true; claim(); }
-    })
-    .catch((e) => {
-      clearTimeout(watchdog);
-      const why = e && (e.message || e.error_code || e.error || (typeof e === "string" ? e : ""));
+      const why = e && (e.message || (typeof e === "string" ? e : ""));
       fail("No ad could be shown right now" + (why ? " (" + String(why).slice(0, 60) + ")" : "") + ". Please try again shortly.");
     });
+  };
 }
 
 async function claim() {
@@ -210,12 +226,13 @@ function showBot(bot) {
 async function begin() {
   $("retry").hidden = true;
   $("openbot").hidden = true;
+  $("watch").hidden = true;
   setIcon("");
   rewarded = false;
   if (!tg.initData) { fail("Please open this inside Telegram."); return; }
   setStatus("Getting ready…");
 
-  const sdkP = waitForSdk(CFG.sdkFn, 10000).catch(() => null);   // session start ke saath hi SDK load
+  const sdkP = waitForTads(10000).catch(() => null);   // session start ke saath hi SDK load
   let s;
   try { s = await api("/api/ad/start"); }
   catch (e) { fail("Network error. Please try again."); return; }
