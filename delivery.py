@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import time
 from urllib.parse import quote
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter, TelegramError
 
-from config import LINK_BASE_URL
+import db
+from config import AUTO_DELETE_SECONDS, LINK_BASE_URL
 
 log = logging.getLogger("delivery")
 
@@ -21,21 +23,44 @@ def _after_kb(token: str) -> InlineKeyboardMarkup:
     )
 
 
+def _warn_text() -> str:
+    secs = AUTO_DELETE_SECONDS
+    when = f"{secs // 60} minute{'s' if secs // 60 != 1 else ''}" if secs % 60 == 0 else f"{secs} seconds"
+    return f"⚠️ This file will be deleted in {when}. Forward it to your Saved Messages now to keep it."
+
+
+def _with_warning(caption: str) -> str:
+    if AUTO_DELETE_SECONDS <= 0:
+        return caption
+    warn = _warn_text()
+    room = 1024 - len(warn) - 2          # Telegram caption limit 1024
+    if caption and room > 0:
+        return caption[:room] + "\n\n" + warn
+    return warn
+
+
 async def send_file(bot, chat_id: int, doc: dict, manager) -> bool:
-    caption = doc.get("caption") or ""
+    caption = _with_warning(doc.get("caption") or "")
     token = doc["token"]
     kb = _after_kb(token)
 
     for loc in doc["locations"]:
         for _attempt in range(2):
             try:
-                await bot.copy_message(
+                sent = await bot.copy_message(
                     chat_id=chat_id,
                     from_chat_id=loc["channel"],
                     message_id=loc["msg"],
                     caption=caption,
                     reply_markup=kb,
                 )
+                if AUTO_DELETE_SECONDS > 0:
+                    try:
+                        await db.schedule_delete(
+                            bot.id, chat_id, sent.message_id, time.time() + AUTO_DELETE_SECONDS
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("schedule_delete failed token=%s", token)
                 return True
             except RetryAfter as e:
                 await asyncio.sleep(min(e.retry_after, 5))
