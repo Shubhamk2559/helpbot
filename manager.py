@@ -272,5 +272,7 @@ class BotManager:
         if self._cache and time.time() - self._cache[0] < 30:
             return self._cache[1]
         names = [b["username"] for b in await db.list_bots("active")]
+        if self.main and self.main.bot.username:  # main bot khud bhi delivery karta hai
+            names.append(self.main.bot.username)
         self._cache = (time.time(), names)
         return names
