@@ -30,6 +30,10 @@ from config import (
     CHANNEL_URL,
     LINK_BASE_URL,
     OWNER_ID,
+    POST_BUTTON_TEXT,
+    POST_CAPTION,
+    POST_CHANNEL,
+    POST_MAX_VIDEOS,
     PRIMARY_CHANNEL,
     SUPPORT_URL,
     VERIFY_REQUIRED,
@@ -279,7 +283,7 @@ def kb_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [btn("📁 My Files", "f_list:0"), btn("📤 Upload", "m_up")],
-            [btn("📊 Stats", "m_stats")],
+            [btn("📝 Create Post", "m_post"), btn("📊 Stats", "m_stats")],
         ]
     )
 
@@ -296,7 +300,23 @@ def kb_after(*more: InlineKeyboardButton) -> InlineKeyboardMarkup:
 
 async def stats_line() -> str:
     n_files = await db.count_files()
-    return f"📁 Files: <b>{n_files}</b>   •   🤖 Delivery: <b>this bot</b>\n\n"
+    today = await db.views_today()
+    return f"📁 Files: <b>{n_files}</b>   •   👁 Aaj ke views: <b>{today}</b>\n\n"
+
+
+async def stats_text() -> str:
+    n_files = await db.count_files()
+    total = await db.views_total()
+    days = await db.views_last_days(7)
+    lines = "\n".join(f"{'👉' if i == 0 else '▫️'} {d}: <b>{v}</b>" for i, (d, v) in enumerate(days))
+    return (
+        "📊 <b>Stats</b>\n\n"
+        f"👁 <b>Aaj ke views: {days[0][1]}</b>\n"
+        f"📈 Total views: <b>{total}</b>\n"
+        f"📁 Files / posts: <b>{n_files}</b>\n\n"
+        f"🗓 <b>Last 7 days</b>\n{lines}\n\n"
+        "<i>View = jab user ad dekh kar file/videos receive kare.</i>"
+    )
 
 
 # ---------- bots ----------
@@ -360,22 +380,27 @@ async def file_screen(token: str):
         return "❌🔍 File nahi mili (shayad delete ho chuki).", InlineKeyboardMarkup([[btn("📁 Files", "f_list:0")]])
     link = f"{LINK_BASE_URL}/f/{token}"
     cap = html.escape((f.get("caption") or "").strip()[:200]) or "<i>(no caption)</i>"
-    text = f"📄 <b>File</b> <code>{token}</code>\n\n📝 {cap}\n\n🔗 <code>{html.escape(link)}</code>"
-    kb = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔗 Open", url=link), InlineKeyboardButton("📋 Copy", copy_text=CopyTextButton(text=link))],
-            [btn("🗑 Delete", f"fd:{token}")],
-            [btn("⬅️ Files", "f_list:0"), btn("🏠 Menu", "m_home")],
-        ]
+    views = int(f.get("views", 0))
+    text = (
+        f"📄 <b>{'Post' if f.get('items') else 'File'}</b> <code>{token}</code>\n\n"
+        f"📝 {cap}\n👁 Views: <b>{views}</b>\n\n🔗 <code>{html.escape(link)}</code>"
     )
-    return text, kb
+    rows = [[InlineKeyboardButton("🔗 Open", url=link), InlineKeyboardButton("📋 Copy", copy_text=CopyTextButton(text=link))]]
+    if f.get("items") and POST_CHANNEL:
+        rows.append([btn("📢 Post to channel", f"pc:{token}")])
+    rows.append([btn("🗑 Delete", f"fd:{token}")])
+    rows.append([btn("⬅️ Files", "f_list:0"), btn("🏠 Menu", "m_home")])
+    return text, InlineKeyboardMarkup(rows)
 
 
 async def delete_file_everywhere(bot, token: str) -> bool:
     f = await db.get_file(token)
     if not f:
         return False
-    for loc in f.get("locations", []):
+    locs = list(f.get("locations", []))
+    for it in f.get("items", []):
+        locs.extend(it.get("locations", []))
+    for loc in locs:
         try:
             await bot.delete_message(loc["channel"], loc["msg"])
         except TelegramError as e:
@@ -397,6 +422,7 @@ async def show(q, text: str, kb: InlineKeyboardMarkup):
 
 async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(AWAIT_KEY, None)
+    context.user_data.pop(POST_KEY, None)
     await update.effective_message.reply_text(menu_text(await stats_line()), parse_mode=HTML, reply_markup=kb_menu())
 
 
@@ -427,13 +453,15 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data != "m_add":
         context.user_data.pop(AWAIT_KEY, None)  # koi bhi aur button = token input cancel
+    if data not in ("m_post", "p_done"):
+        context.user_data.pop(POST_KEY, None)   # koi bhi aur button = post banana cancel
 
     if data == "m_home":
         await q.answer()
         await show(q, menu_text(await stats_line()), kb_menu())
     elif data == "m_stats":
         await q.answer()
-        await show(q, "📊 <b>Stats</b>\n\n" + await stats_line(), kb_menu_only())
+        await show(q, await stats_text(), kb_menu_only())
     elif data == "m_up":
         await q.answer()
         await show(
@@ -504,6 +532,30 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await manager.refresh()
         await q.answer("🗑 Removed")
         await show(q, *await bots_screen())
+    elif data == "m_post":
+        await q.answer()
+        post = {"photo": None, "videos": [], "caption": None, "panel": (q.message.chat_id, q.message.message_id)}
+        context.user_data[POST_KEY] = post
+        await show(q, post_panel_text(post), kb_post())
+    elif data == "p_done":
+        await create_post(q, context)
+    elif data.startswith("pc:"):
+        f = await db.get_file(data[3:])
+        if not f or not f.get("photo"):
+            await q.answer("❌ Post nahi mila", show_alert=True)
+        elif not POST_CHANNEL:
+            await q.answer("POST_CHANNEL env set nahi hai", show_alert=True)
+        else:
+            try:
+                await context.bot.send_photo(
+                    POST_CHANNEL,
+                    f["photo"],
+                    caption=(f.get("post_caption") or POST_CAPTION)[:1024],
+                    reply_markup=post_button(f"{LINK_BASE_URL}/f/{f['token']}"),
+                )
+                await q.answer("📢 Channel me post ho gaya ✅", show_alert=True)
+            except TelegramError as e:
+                await q.answer(f"❌ {str(e)[:150]}", show_alert=True)
     elif data.startswith("f_list:"):
         await q.answer()
         await show(q, *await files_screen(int(data.split(":")[1])))
@@ -542,12 +594,19 @@ async def owner_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await manager.add_bot(token)
         await edit(status, html.escape(result), kb_after(btn("➕ Add another", "m_add")))
         return
+    if context.user_data.get(POST_KEY) is not None:
+        bg(react(msg, "🤔"))
+        await msg.reply_text("📝 Post banane ke liye <b>image / video</b> bhejo, phir ✅ Create Post dabao.", parse_mode=HTML)
+        return
     bg(react(msg, "🤔"))
     await send_menu(update, context)
 
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
+    if context.user_data.get(POST_KEY) is not None:   # Create Post mode: bas collect karo
+        await post_collect(update, context)
+        return
     context.user_data.pop(AWAIT_KEY, None)
     status = await msg.reply_text("⏳💾 <b>Uploading & backing up…</b>", parse_mode=HTML)
 
@@ -598,12 +657,159 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------- Create Post: 1 image + kai videos -> ek link -> ek button ----------
+POST_KEY = "post"   # context.user_data[POST_KEY] = {"photo", "videos", "caption", "panel"}
+
+
+def post_button(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(POST_BUTTON_TEXT, url=link)]])
+
+
+def post_panel_text(post: dict) -> str:
+    return (
+        "📝🎬 <b>Create Post</b>\n\n"
+        f"📸 Image: {'✅' if post.get('photo') else '❌ (bhejo)'}\n"
+        f"🎬 Videos: <b>{len(post['videos'])}</b> / {POST_MAX_VIDEOS}\n"
+        f"✍️ Caption: {'custom ✅' if post.get('caption') else 'default (POST_CAPTION)'}\n\n"
+        "1 image + video(s) bhejo (ek saath ya ek-ek karke). Image ke saath caption likhoge to wahi caption banega.\n"
+        "Phir ✅ Create Post dabao 👇"
+    )
+
+
+def kb_post() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[btn("✅ Create Post", "p_done")], [btn("❌ Cancel", "m_home")]])
+
+
+async def refresh_post_panel(context: ContextTypes.DEFAULT_TYPE, post: dict):
+    panel = post.get("panel")
+    if not panel:
+        return
+    try:
+        await context.bot.edit_message_text(
+            post_panel_text(post), chat_id=panel[0], message_id=panel[1], parse_mode=HTML, reply_markup=kb_post()
+        )
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            log.warning("post panel edit failed: %s", e)
+    except TelegramError as e:
+        log.warning("post panel edit failed: %s", e)
+
+
+async def post_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    post = context.user_data[POST_KEY]
+    if msg.photo:
+        post["photo"] = msg.photo[-1].file_id
+        if msg.caption:
+            post["caption"] = msg.caption[:1000]
+    elif msg.video or msg.animation or msg.document:
+        if len(post["videos"]) >= POST_MAX_VIDEOS:
+            bg(react(msg, "😢"))
+            return
+        post["videos"].append({"msg": msg.message_id, "caption": (msg.caption or "")[:900]})
+    else:
+        bg(react(msg, "🤔"))
+        return
+    bg(react(msg, "👍"))
+    await refresh_post_panel(context, post)
+
+
+async def store_to_channels(bot, from_chat: int, msg_id: int, caption: str, label: str):
+    """Primary + backup channel me save. Primary fail = TelegramError. Return (locations, warn)."""
+    a = await bot.copy_message(
+        chat_id=PRIMARY_CHANNEL,
+        from_chat_id=from_chat,
+        message_id=msg_id,
+        caption=f"{caption}\n\nID: {label}".strip(),
+    )
+    locations = [{"channel": PRIMARY_CHANNEL, "msg": a.message_id}]
+    warn = ""
+    try:
+        b = await bot.copy_message(chat_id=BACKUP_CHANNEL, from_chat_id=PRIMARY_CHANNEL, message_id=a.message_id)
+        locations.append({"channel": BACKUP_CHANNEL, "msg": b.message_id})
+    except TelegramError as e:
+        warn = str(e)
+    return locations, warn
+
+
+async def create_post(q, context: ContextTypes.DEFAULT_TYPE):
+    post = context.user_data.get(POST_KEY)
+    if not post:
+        await q.answer("Pehle 📝 Create Post dabao", show_alert=True)
+        return
+    if not post.get("photo") or not post["videos"]:
+        await q.answer("Image aur kam se kam 1 video bhejo", show_alert=True)
+        await refresh_post_panel(context, post)
+        return
+    await q.answer()
+    context.user_data.pop(POST_KEY, None)
+    chat_id = q.message.chat_id
+    n = len(post["videos"])
+    await show(q, f"⏳💾 <b>Uploading & backing up {n} video{'s' if n != 1 else ''}…</b>", None)
+
+    gtoken = secrets.token_urlsafe(6)
+    items, warns = [], 0
+    try:
+        for i, v in enumerate(post["videos"], 1):
+            locs, warn = await store_to_channels(context.bot, chat_id, v["msg"], v["caption"], f"{gtoken} #{i}")
+            items.append({"locations": locs, "caption": v["caption"]})
+            warns += 1 if warn else 0
+    except TelegramError as e:
+        for it in items:  # adhura upload wapas hata do
+            for loc in it["locations"]:
+                try:
+                    await context.bot.delete_message(loc["channel"], loc["msg"])
+                except TelegramError:
+                    pass
+        post["panel"] = (chat_id, q.message.message_id)
+        context.user_data[POST_KEY] = post
+        await show(
+            q,
+            f"❌😢 <b>Upload failed</b>\n<code>{html.escape(str(e))}</code>\n\n"
+            "👑 Bot ko dono channels ka admin banao, phir ✅ Create Post dobara dabao.\n\n" + post_panel_text(post),
+            kb_post(),
+        )
+        return
+
+    caption = post.get("caption") or POST_CAPTION
+    link = f"{LINK_BASE_URL}/f/{gtoken}"
+    await db.save_post(gtoken, items, caption, post["photo"])
+
+    try:
+        await q.message.delete()
+    except TelegramError:
+        pass
+    try:  # ye wahi post hai jo channel me jayega
+        await context.bot.send_photo(chat_id, post["photo"], caption=caption[:1024], reply_markup=post_button(link))
+    except TelegramError as e:
+        await context.bot.send_message(chat_id, f"⚠️ Preview nahi ban paya: {html.escape(str(e))}", parse_mode=HTML)
+
+    note = f"\n\n⚠️ {warns} video ka backup copy fail hua" if warns else ""
+    rows = []
+    if POST_CHANNEL:
+        rows.append([btn("📢 Post to channel", f"pc:{gtoken}")])
+    rows.append(
+        [InlineKeyboardButton("🔗 Open", url=link), InlineKeyboardButton("📋 Copy", copy_text=CopyTextButton(text=link))]
+    )
+    rows.append([btn("📝 New post", "m_post"), btn("📄 Manage", f"f:{gtoken}")])
+    rows.append([btn("🏠 Menu", "m_home")])
+    await context.bot.send_message(
+        chat_id,
+        f"✅🎉 <b>Post ready!</b> 🔥\n\n🎬 {n} video{'s' if n != 1 else ''} • ek link, ek ad\n"
+        f"🔗 <code>{html.escape(link)}</code>\n\n👆 Upar wala post forward karo"
+        + (" ya 📢 se channel me daalo." if POST_CHANNEL else ".")
+        + note,
+        parse_mode=HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
 def register_main_handlers(app: Application):
     # /start Telegram ka built-in entry hai (link kholne par khud lagta hai). Baaki sab buttons.
     app.add_handler(CommandHandler("start", start_router))
     # --- owner panel (sirf owner) ---
     app.add_handler(
-        CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|noop$)")
+        CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|pc:|p_done$|noop$)")
     )
     app.add_handler(MessageHandler(owner_only & filters.ATTACHMENT & ~filters.COMMAND, upload))
     app.add_handler(MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, owner_text))
