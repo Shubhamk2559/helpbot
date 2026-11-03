@@ -246,6 +246,11 @@ async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def register_delivery_handlers_extra(app: Application):
+    app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^(home|how|faq|help|why)$"))
+    app.add_handler(MessageHandler((filters.TEXT | filters.COMMAND) & filters.ChatType.PRIVATE, fallback_text))
+
+
 def register_delivery_handlers(app: Application):
     app.add_handler(CommandHandler("start", deliver_start))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^(home|how|faq|help|why)$"))
@@ -265,16 +270,15 @@ def menu_text(stats: str = "") -> str:
         "🛠⚡ <b>Control Center</b> ⚡🛠\n\n"
         f"{stats}"
         "📤 Koi bhi file/video/photo bhejo → upload + backup + permanent link 🔗🔥\n\n"
-        "👇 Neeche ke buttons se sab manage karo"
+        "👇 Neeche ke buttons se sab manage karo\n🔗 Link kholne wale users ko video isi bot se milega"
     )
 
 
 def kb_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [btn("🤖 My Bots", "m_bots"), btn("➕ Add Bot", "m_add")],
             [btn("📁 My Files", "f_list:0"), btn("📤 Upload", "m_up")],
-            [btn("🩺 Health Check", "m_health"), btn("📊 Stats", "m_stats")],
+            [btn("📊 Stats", "m_stats")],
         ]
     )
 
@@ -285,15 +289,13 @@ def kb_menu_only() -> InlineKeyboardMarkup:
 
 def kb_after(*more: InlineKeyboardButton) -> InlineKeyboardMarkup:
     rows = [list(more)] if more else []
-    rows.append([btn("🤖 My Bots", "m_bots"), btn("🏠 Menu", "m_home")])
+    rows.append([btn("📁 My Files", "f_list:0"), btn("🏠 Menu", "m_home")])
     return InlineKeyboardMarkup(rows)
 
 
 async def stats_line() -> str:
-    bots = await db.list_bots()
-    active = sum(1 for b in bots if b["status"] == "active")
     n_files = await db.count_files()
-    return f"🤖 Bots: <b>{active}</b> active / {len(bots)} total   •   📁 Files: <b>{n_files}</b>\n\n"
+    return f"📁 Files: <b>{n_files}</b>   •   🤖 Delivery: <b>this bot</b>\n\n"
 
 
 # ---------- bots ----------
@@ -400,6 +402,15 @@ async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def owner_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bg(react(update.effective_message, "🔥"))
     await send_menu(update, context)
+
+
+async def start_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ek hi bot: link (/start TOKEN) = file delivery sabke liye; bina token = owner ko panel, baaki ko welcome."""
+    user = update.effective_user
+    if context.args or not user or user.id != OWNER_ID:
+        await deliver_start(update, context)
+    else:
+        await owner_start(update, context)
 
 
 async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -587,10 +598,14 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_main_handlers(app: Application):
-    # /start Telegram ka built-in entry hai (pehli baar chat kholne par). Uske baad sab buttons.
-    app.add_handler(CommandHandler("start", owner_start, filters=owner_only))
-    app.add_handler(CallbackQueryHandler(on_owner_callback))
+    # /start Telegram ka built-in entry hai (link kholne par khud lagta hai). Baaki sab buttons.
+    app.add_handler(CommandHandler("start", start_router))
+    # --- owner panel (sirf owner) ---
+    app.add_handler(
+        CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|noop$)")
+    )
     app.add_handler(MessageHandler(owner_only & filters.ATTACHMENT & ~filters.COMMAND, upload))
-    # koi bhi aur /command ya text -> bas menu dikha do
     app.add_handler(MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, owner_text))
     app.add_handler(MessageHandler(owner_only & filters.COMMAND, owner_start))
+    # --- delivery (sab users): Home / How / FAQ / Help / Why + random text ---
+    register_delivery_handlers_extra(app)
