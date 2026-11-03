@@ -189,6 +189,7 @@ async def deliver_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=chat.id,
         bot_id=context.application.bot_data["bot_id"],
         required=ADS_REQUIRED,
+        prompt_msg=status.message_id,
     )
     kb = InlineKeyboardMarkup(
         [
