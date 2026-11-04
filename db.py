@@ -123,10 +123,13 @@ async def get_session(sid: str):
     return await sessions.find_one({"sid": sid})
 
 
-async def start_ad(sid: str):
-    await sessions.update_one(
-        {"sid": sid, "delivered": False}, {"$set": {"ad_started_at": time.time()}}
-    )
+async def start_ad(sid: str, ymid: str | None = None, zone: str | None = None):
+    """ymid/zone optional: purana call (sirf sid) pehle jaisa hi kaam karta hai."""
+    fields = {"ad_started_at": time.time()}
+    if ymid:
+        fields["cur_ymid"] = ymid
+        fields["cur_zone"] = zone
+    await sessions.update_one({"sid": sid, "delivered": False}, {"$set": fields})
 
 
 async def complete_ad(sid: str, min_seconds: int):
