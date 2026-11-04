@@ -86,3 +86,10 @@ BULK_POST_DELAY = float(os.getenv("BULK_POST_DELAY", "3"))       # channel me 2 
 # True = post ka button seedha t.me/<bot> link kholta hai (Telegram ka "Open Link" confirm box nahi aata).
 # Har post par random active bot chuna jata hai. False = purana /f/ redirect link (confirm box aayega).
 POST_DIRECT_LINK = _bool("POST_DIRECT_LINK", True)
+
+# ---- Copy Chats / Userbot (Telethon): apne Telegram account se chats ka media channel me copy ----
+# my.telegram.org -> API development tools -> api_id + api_hash. Dono khali = feature band.
+TG_API_ID = int(os.getenv("TG_API_ID", "0").strip() or 0)
+TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
+UB_BATCH = int(os.getenv("UB_BATCH", "20"))        # ek forward call me max kitne messages
+UB_DELAY = float(os.getenv("UB_DELAY", "3"))       # 2 forward calls ke beech (sec). Kam mat karo, account limit ho sakta hai
