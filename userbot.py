@@ -2,6 +2,7 @@
 private channel me copy karta hai.
 
 - Copy = Telegram ka server-side forward with drop_author  -> "Forwarded from" tag nahi, download/upload nahi.
+- Destination: post-rights wala channel, apna Saved Messages, ya koi bhi personal (user) chat.
 - Jis chat me "Restrict saving content" on hai, Telegram copy hone hi nahi deta; ye module usse bypass nahi karta.
 - Session string Fernet se encrypt hokar MongoDB me jaati hai.
 """
@@ -161,25 +162,41 @@ async def shutdown():
 
 
 # ===================== dialogs =====================
+def _dest_ok(kind: str, post: bool, dead: bool = False) -> bool:
+    """Destination ban sakta hai? Saved Messages, personal chat (bot/deleted nahi) ya post-rights wala channel."""
+    if kind == "saved":
+        return True
+    if kind == "user":
+        return not dead
+    return bool(post)
+
+
 async def list_dialogs(client: TelegramClient, limit: int = 400) -> list[dict]:
+    me = await client.get_me()
     out = []
     async for d in client.iter_dialogs(limit=limit):
         e = d.entity
-        if getattr(e, "is_self", False):
+        dead = bool(getattr(e, "deleted", False))
+        if getattr(e, "is_self", False) or d.id == me.id:
             kind, title = "saved", "Saved Messages"
         elif d.is_channel and not d.is_group:
             kind, title = "channel", d.name or "Channel"
         elif d.is_group:
             kind, title = "group", d.name or "Group"
+        elif getattr(e, "bot", False):
+            kind, title = "bot", d.name or "Bot"
         else:
-            kind, title = "user", d.name or "User"
+            kind, title = "user", d.name or ("Deleted account" if dead else "User")
         post = bool(d.is_channel and (getattr(e, "creator", False) or getattr(e, "admin_rights", None)))
-        out.append({"id": d.id, "title": title, "kind": kind, "post": post})
+        out.append({"id": d.id, "title": title, "kind": kind, "post": post, "dest": _dest_ok(kind, post, dead)})
+    # Saved Messages hamesha sabse upar (khali ho to Telegram dialog list me nahi deta)
+    out = [x for x in out if x["kind"] != "saved"]
+    out.insert(0, {"id": me.id, "title": "Saved Messages", "kind": "saved", "post": False, "dest": True})
     return out
 
 
 async def resolve(client: TelegramClient, text: str):
-    """@username / t.me link -> {"id", "title", "kind", "post"} ya None."""
+    """@username / t.me link -> {"id", "title", "kind", "post", "dest"} ya None."""
     try:
         e = await client.get_entity(text.strip())
     except Exception:  # noqa: BLE001
@@ -187,9 +204,17 @@ async def resolve(client: TelegramClient, text: str):
     from telethon import utils
 
     title = utils.get_display_name(e) or "Chat"
-    kind = "channel" if isinstance(e, types.Channel) and not e.megagroup else ("group" if isinstance(e, (types.Channel, types.Chat)) else "user")
+    dead = bool(getattr(e, "deleted", False))
+    if isinstance(e, types.User):
+        kind = "saved" if getattr(e, "is_self", False) else ("bot" if e.bot else "user")
+        if kind == "saved":
+            title = "Saved Messages"
+    elif isinstance(e, types.Channel) and not e.megagroup:
+        kind = "channel"
+    else:
+        kind = "group"
     post = bool(isinstance(e, types.Channel) and (e.creator or e.admin_rights))
-    return {"id": utils.get_peer_id(e), "title": title, "kind": kind, "post": post}
+    return {"id": utils.get_peer_id(e), "title": title, "kind": kind, "post": post, "dest": _dest_ok(kind, post, dead)}
 
 
 # ===================== copy engine =====================
@@ -249,19 +274,33 @@ async def _forward(client, from_peer, to_peer, ids: list[int]):
 
 _FATAL = {
     "CHAT_FORWARDS_RESTRICTED": "Is chat me 'Restrict saving content' on hai, Telegram copy nahi karne deta. (Bot isse bypass nahi karta.)",
-    "CHAT_WRITE_FORBIDDEN": "Is account ko destination channel me post karne ka haq nahi hai. Account ko admin banao.",
+    "CHAT_WRITE_FORBIDDEN": "Is account ko destination me message bhejne ka haq nahi hai. (Channel ho to account ko admin banao.)",
     "CHAT_ADMIN_REQUIRED": "Destination channel me account ko admin (post messages) banao.",
     "CHANNEL_PRIVATE": "Source ya destination ab accessible nahi hai (account us me nahi hai).",
     "USER_BANNED_IN_CHANNEL": "Account destination channel me banned hai.",
+    "USER_IS_BLOCKED": "Is personal chat wale user ne tumhe block kiya hua hai, isliye message nahi ja sakta.",
+    "YOU_BLOCKED_USER": "Tumne is user ko block kiya hua hai. Unblock karke dobara try karo.",
+    "INPUT_USER_DEACTIVATED": "Destination user ka account delete ho chuka hai.",
+    "USER_PRIVACY_RESTRICTED": "Is user ki privacy settings tumhe message bhejne nahi deti.",
+    "PEER_ID_INVALID": "Destination/source chat valid nahi hai. Account kholke dobara chuno.",
+    "PEER_FLOOD": "Telegram ne account ko temporary spam limit me daal diya (PEER_FLOOD). Thodi der baad try karo.",
 }
+
+
+async def _peer(client, chat_id: int, me_id: int):
+    """Apna Saved Messages = InputPeerSelf (entity cache par depend nahi), baaki normal input entity."""
+    if chat_id == me_id:
+        return types.InputPeerSelf()
+    return await client.get_input_entity(chat_id)
 
 
 async def copy_chat(client, src_id: int, dest_id: int, kinds: set, cap_only: bool, min_id: int, job: dict, progress=None, acc: int = 0) -> dict:
     """src chat ke matching media ko dest me copy karo. Result dict return."""
     res = {"scanned": 0, "copied": 0, "skipped": 0, "errors": 0, "total": 0, "aborted": "", "stopped": False, "last_error": "", "last_id": min_id}
     try:
-        src = await client.get_input_entity(src_id)
-        dest = await client.get_input_entity(dest_id)
+        me_id = (await client.get_me()).id
+        src = await _peer(client, src_id, me_id)
+        dest = await _peer(client, dest_id, me_id)
     except Exception as e:  # noqa: BLE001
         res["aborted"] = f"Chat nahi mila ({e}). Account kholke source/destination dobara chuno."
         return res
