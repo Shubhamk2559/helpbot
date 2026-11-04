@@ -20,20 +20,45 @@ from telegram.error import Forbidden, TelegramError
 
 import db
 import userbot
+import monetag_engine as engine
+import monetag_store as mstore
 from config import (
     ADS_REQUIRED,
+    AD_VERIFY_MODE,
+    BLOCK_NON_VALUED,
     DIRECT_MINIAPP,
     MINIAPP_SHORT_NAME,
     MIN_AD_SECONDS,
-    ROLE,
+    MONETAG_ADMIN_TOKEN,
+    MONETAG_DEFAULT_ZONE,
+    MONETAG_GEO_HEADER,
+    MONETAG_POSTBACK_SECRET,
     MONETAG_SDK_URL,
     MONETAG_SHOW_LOG,
+    MONETAG_WINDOW_DAYS,
     MONETAG_ZONE_ID,
+    MONETAG_ZONES,
+    POSTBACK_WAIT_SECONDS,
+    ROLE,
 )
 from delivery import send_file
 from manager import BotManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+
+class _RedactSecrets(logging.Filter):
+    """Monetag postback URL me secret query-string me hota hai; access log me na chhape."""
+
+    _RE = re.compile(r"(secret|token)=[^&\s\"]+", re.I)
+
+    def filter(self, record):
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._RE.sub(r"\1=***", a) if isinstance(a, str) else a for a in record.args)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactSecrets())
 
 manager = BotManager()
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
@@ -134,18 +159,22 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = 3600):
 
 
 if ROLE in ("worker", "both"):
+    # Default zone ka SDK tag pehle jaisa static rehta hai (koi extra latency nahi).
+    # Doosre zones sirf tab dynamically load hote hain jab optimizer unhe chune.
+    _DEFAULT_ZONE = MONETAG_DEFAULT_ZONE
     _CFG = json.dumps(
         {
-            "zoneId": MONETAG_ZONE_ID,
+            "zoneId": _DEFAULT_ZONE,
             "showLog": MONETAG_SHOW_LOG,
             "required": ADS_REQUIRED,
+            "blockNonValued": BLOCK_NON_VALUED,
         }
     ).replace("</", "<\\/")
 
     _TAG = (
-        f'<script src="{html.escape(MONETAG_SDK_URL, quote=True)}" '
-        f'data-zone="{html.escape(MONETAG_ZONE_ID, quote=True)}" '
-        f'data-sdk="show_{html.escape(MONETAG_ZONE_ID, quote=True)}" '
+        f'<script src="{html.escape(engine.sdk_url(_DEFAULT_ZONE), quote=True)}" '
+        f'data-zone="{html.escape(_DEFAULT_ZONE, quote=True)}" '
+        f'data-sdk="show_{html.escape(_DEFAULT_ZONE, quote=True)}" '
         f'onerror="window.__sdkErr=1"></script>'
     )
 
@@ -182,6 +211,12 @@ if ROLE in ("worker", "both"):
             if info:
                 return application, info
         return None, None
+
+    def _country(request: Request):
+        if not MONETAG_GEO_HEADER:
+            return None
+        c = (request.headers.get(MONETAG_GEO_HEADER) or "").strip().upper()
+        return c if re.fullmatch(r"[A-Z]{2}", c) and c not in ("XX", "T1") else None
 
     @app.post("/api/ad/start")
     async def ad_start(request: Request):
@@ -221,13 +256,39 @@ if ROLE in ("worker", "both"):
 
         if s["delivered"]:
             return {"ok": False, "error": "You already received this file."}
-        await db.start_ad(s["sid"])
+
+        # Har ad show ka apna unique ymid (Monetag docs: "unique ymid per ad show") + zone choice.
+        zone = await engine.select_zone()
+        ymid = f"{s['sid']}.{secrets.token_hex(4)}"
+        await db.start_ad(s["sid"], ymid, zone)
+        try:
+            await mstore.record_attempt(ymid, s["sid"], zone, _country(request))
+        except Exception:  # noqa: BLE001 — analytics kabhi delivery na roke
+            logging.getLogger("monetag").exception("record_attempt failed")
         return {
             "ok": True,
             "sid": s["sid"],
+            "ymid": ymid,
+            "zone": zone,
+            "sdk": engine.sdk_url(zone),
             "ads_done": s["ads_done"],
             "ads_required": s["ads_required"],
         }
+
+    @app.post("/api/ad/fail")
+    async def ad_fail(request: Request):
+        """Client SDK error report (stats + auto-bench). Reward par koi asar nahi."""
+        body = await request.json()
+        s, _application, err = await _auth(body)
+        if err:
+            return {"ok": False}
+        ymid = body.get("ymid")
+        if isinstance(ymid, str) and ymid == s.get("cur_ymid"):
+            try:
+                await mstore.record_fail(ymid, s["sid"], str(body.get("reason") or "error")[:20])
+            except Exception:  # noqa: BLE001
+                logging.getLogger("monetag").exception("record_fail failed")
+        return {"ok": True}
 
     @app.post("/api/ad/done")
     async def ad_done(request: Request):
@@ -238,6 +299,12 @@ if ROLE in ("worker", "both"):
         if s["delivered"]:
             return {"ok": False, "error": "You already received this file."}
 
+        # Yeh wahi ad show hona chahiye jo is session ke liye abhi start hua tha
+        ymid = body.get("ymid") if isinstance(body.get("ymid"), str) else None
+        expected = s.get("cur_ymid")
+        if (expected or AD_VERIFY_MODE == "postback") and ymid != expected:
+            return {"ok": False, "error": "This ad session is outdated. Please try again."}
+
         started = s.get("ad_started_at")
         if not started:
             return {"ok": False, "error": "The ad didn't start. Please try again."}
@@ -245,9 +312,29 @@ if ROLE in ("worker", "both"):
         if elapsed < MIN_AD_SECONDS:
             return {"ok": True, "wait": math.ceil(MIN_AD_SECONDS - elapsed)}
 
+        # ---- server-side confirmation by Monetag postback (AD_VERIFY_MODE=postback) ----
+        if AD_VERIFY_MODE == "postback":
+            ad = await mstore.get_ad(ymid)
+            if not ad or ad.get("sid") != s["sid"]:
+                return {"ok": False, "error": "Verification failed. Please try again."}
+            if not ad.get("pb_seen"):
+                first = ad.get("done_first_at") or await mstore.mark_done_first(ymid)
+                if time.time() - first < POSTBACK_WAIT_SECONDS:
+                    return {"ok": True, "wait": 2}       # Monetag postback abhi aaya nahi, thoda ruko
+                await mstore.record_fail(ymid, s["sid"], "unverified")
+                return {"ok": False, "error": "We couldn't confirm the ad view. Please try again."}
+            if not ad.get("pb_valued"):
+                await mstore.record_fail(ymid, s["sid"], "non_valued")
+                return {"ok": False, "error": "That ad didn't count. Please try again."}
+
         s2 = await db.complete_ad(s["sid"], MIN_AD_SECONDS)
         if not s2:
             return {"ok": False, "error": "Duplicate request."}
+        if ymid:
+            try:
+                await mstore.record_completion(ymid)
+            except Exception:  # noqa: BLE001
+                logging.getLogger("monetag").exception("record_completion failed")
         if s2["ads_done"] < s2["ads_required"]:
             return {
                 "ok": True,
@@ -278,3 +365,51 @@ if ROLE in ("worker", "both"):
             "ads_done": s2["ads_done"],
             "ads_required": s2["ads_required"],
         }
+
+    # ---------------- Monetag postback (server-to-server) ----------------
+    if MONETAG_POSTBACK_SECRET:
+
+        @app.get("/api/monetag/postback")
+        async def monetag_postback(request: Request):
+            q = dict(request.query_params)
+            if not hmac.compare_digest(q.get("secret", ""), MONETAG_POSTBACK_SECRET):
+                raise HTTPException(status_code=403)
+            try:
+                status = await mstore.record_postback(q)
+            except Exception:  # noqa: BLE001
+                logging.getLogger("monetag").exception("postback store failed")
+                raise HTTPException(status_code=500)   # Monetag baad me retry karega
+            return PlainTextResponse(status)
+
+    # ---------------- admin analytics ----------------
+    def _admin_ok(authorization: str | None) -> bool:
+        if not MONETAG_ADMIN_TOKEN:
+            return False
+        got = (authorization or "").removeprefix("Bearer ").strip()
+        return hmac.compare_digest(got, MONETAG_ADMIN_TOKEN)
+
+    @app.get("/admin/monetag")
+    async def admin_monetag(days: int = MONETAG_WINDOW_DAYS, authorization: str | None = Header(default=None)):
+        if not MONETAG_ADMIN_TOKEN:
+            raise HTTPException(status_code=404)
+        if not _admin_ok(authorization):
+            raise HTTPException(status_code=403)
+        return await mstore.build_report(max(1, min(days, 90)))
+
+    @app.post("/admin/monetag/confirmed")
+    async def admin_monetag_confirmed(request: Request, authorization: str | None = Header(default=None)):
+        """Monetag dashboard se dekha hua asli revenue yahan likho: {"day":"2026-11-03","revenue_usd":12.34}"""
+        if not MONETAG_ADMIN_TOKEN:
+            raise HTTPException(status_code=404)
+        if not _admin_ok(authorization):
+            raise HTTPException(status_code=403)
+        b = await request.json()
+        day, zone = str(b.get("day", "")), str(b.get("zone", "all"))
+        try:
+            rev = float(b.get("revenue_usd"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="revenue_usd must be a number")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or rev < 0 or not (zone == "all" or zone in MONETAG_ZONES):
+            raise HTTPException(status_code=400, detail="bad day/zone/revenue")
+        await mstore.set_confirmed(day, rev, zone)
+        return {"ok": True}
