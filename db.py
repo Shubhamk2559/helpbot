@@ -259,3 +259,43 @@ async def views_last_days(n: int = 7) -> list:
     docs = await stats.find({"day": {"$in": wanted}}).to_list(length=n)
     by_day = {d["day"]: int(d.get("views", 0)) for d in docs}
     return [(d, by_day.get(d, 0)) for d in wanted]
+
+
+# ---------- userbot accounts (Copy Chats) ----------
+userbots = _db.userbots
+ub_progress = _db.ub_progress
+
+
+async def save_userbot(uid: int, name: str, phone: str, session_enc: str):
+    await userbots.update_one(
+        {"uid": uid},
+        {"$set": {"name": name, "phone": phone, "session_enc": session_enc, "updated_at": time.time()},
+         "$setOnInsert": {"added_at": time.time()}},
+        upsert=True,
+    )
+
+
+async def list_userbots():
+    return await userbots.find({}).sort("added_at", 1).to_list(length=50)
+
+
+async def get_userbot(uid: int):
+    return await userbots.find_one({"uid": uid})
+
+
+async def delete_userbot(uid: int):
+    await userbots.delete_one({"uid": uid})
+    await ub_progress.delete_many({"acc": uid})
+
+
+async def get_ub_progress(acc: int, src: int, dest: int) -> int:
+    d = await ub_progress.find_one({"_id": f"{acc}:{src}:{dest}"})
+    return int(d["last_id"]) if d else 0
+
+
+async def set_ub_progress(acc: int, src: int, dest: int, last_id: int):
+    await ub_progress.update_one(
+        {"_id": f"{acc}:{src}:{dest}"},
+        {"$max": {"last_id": last_id}, "$set": {"acc": acc, "updated_at": time.time()}},
+        upsert=True,
+    )
