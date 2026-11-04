@@ -14,6 +14,7 @@ files = _db.files
 sessions = _db.sessions
 pending_deletes = _db.pending_deletes
 stats = _db.stats
+batches = _db.batches
 
 
 async def init():
@@ -24,6 +25,8 @@ async def init():
     await sessions.create_index("created", expireAfterSeconds=SESSION_TTL)
     await pending_deletes.create_index("delete_at")
     await stats.create_index("day", unique=True)
+    await files.create_index([("src_chat", 1), ("src_head", 1)], sparse=True)
+    await batches.create_index("id", unique=True)
 
 
 # ---------- bots registry ----------
@@ -171,7 +174,16 @@ async def remove_delete(_id):
 
 
 # ---------- posts (image + multiple videos behind one link) ----------
-async def save_post(token: str, items: list, post_caption: str, photo: str):
+async def save_post(
+    token: str,
+    items: list,
+    post_caption: str,
+    photo: str,
+    thumb_type: str = "photo",
+    src_chat=None,
+    src_head: int | None = None,
+):
+    """photo = thumbnail ka file_id (thumb_type: photo | video | animation)."""
     await files.insert_one(
         {
             "token": token,
@@ -181,10 +193,31 @@ async def save_post(token: str, items: list, post_caption: str, photo: str):
             "caption": f"📝 Post • {len(items)} video{'s' if len(items) != 1 else ''}",
             "post_caption": post_caption,
             "photo": photo,
+            "thumb_type": thumb_type,
+            "src_chat": src_chat,
+            "src_head": src_head,
             "views": 0,
             "created_at": time.time(),
         }
     )
+
+
+# ---------- bulk import ----------
+async def find_post_by_source(src_chat, src_head: int):
+    """Is source post se pehle hi post ban chuka hai? (dobara run par duplicate se bachao)"""
+    return await files.find_one({"src_chat": src_chat, "src_head": src_head})
+
+
+async def save_batch(batch_id: str, tokens: list):
+    await batches.insert_one({"id": batch_id, "tokens": tokens, "posted": [], "created_at": time.time()})
+
+
+async def get_batch(batch_id: str):
+    return await batches.find_one({"id": batch_id})
+
+
+async def mark_batch_posted(batch_id: str, token: str):
+    await batches.update_one({"id": batch_id}, {"$addToSet": {"posted": token}})
 
 
 # ---------- views (jitni baar file/videos user ko mile) ----------
