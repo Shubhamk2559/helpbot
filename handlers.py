@@ -409,11 +409,13 @@ async def delete_file_everywhere(bot, token: str) -> bool:
     locs = list(f.get("locations", []))
     for it in f.get("items", []):
         locs.extend(it.get("locations", []))
+    locs.extend(f.get("channel_posts", []))   # POST_CHANNEL me gaye thumbnail posts
     for loc in locs:
         try:
-            await bot.delete_message(loc["channel"], loc["msg"])
+            await bulk.with_retry(lambda: bot.delete_message(loc["channel"], loc["msg"]))
         except TelegramError as e:
             log.warning("channel msg delete failed %s: %s", loc, e)
+        await asyncio.sleep(0.05)
     await db.delete_file(token)
     return True
 
@@ -559,7 +561,8 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("POST_CHANNEL env set nahi hai", show_alert=True)
         else:
             try:
-                await send_thumb_post(context.bot, POST_CHANNEL, f, manager)
+                sent_msg = await send_thumb_post(context.bot, POST_CHANNEL, f, manager)
+                await db.add_channel_post(f["token"], POST_CHANNEL, sent_msg.message_id)
                 await q.answer("📢 Channel me post ho gaya ✅", show_alert=True)
             except TelegramError as e:
                 await q.answer(f"❌ {str(e)[:150]}", show_alert=True)
@@ -576,6 +579,27 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("⏹ Rok raha hoon… (abhi ka step khatam hone do)", show_alert=True)
         else:
             await q.answer("Koi job nahi chal raha")
+    elif data == "bk_delall":
+        await q.answer()
+        n = len(await db.list_bulk_tokens())
+        if not n:
+            await show(q, "🗑 Bulk se bana koi post nahi hai.", kb_after())
+        else:
+            await show(
+                q,
+                f"🗑⚠️ Bulk se bane <b>{n}</b> posts delete karne hain?\n\n"
+                "Primary + Backup channel ke videos, channel me gaye thumbnail posts aur links sab hat jayenge. "
+                "Ye wapas nahi aayega.\n<i>(Manual Create Post / Upload wali files safe rahengi.)</i>",
+                InlineKeyboardMarkup([[btn(f"✅ Haan, {n} delete karo", "bk_delall_y"), btn("❌ Nahi", "m_bulk")]]),
+            )
+    elif data == "bk_delall_y":
+        chat_id = q.message.chat_id
+        if chat_id in _bulk_jobs:
+            await q.answer("⏳ Ek job abhi chal raha hai", show_alert=True)
+        else:
+            _bulk_jobs[chat_id] = {"stop": False}
+            await q.answer("🗑 Delete shuru…")
+            bg(run_delete_all(context.bot, chat_id, q.message.message_id))
     elif data.startswith("bk_pub:") or data.startswith("bk_prev:"):
         await bulk_publish_start(q, context, to_channel=data.startswith("bk_pub:"), batch_id=data.split(":", 1)[1])
     elif data.startswith("f_list:"):
@@ -910,6 +934,8 @@ def kb_bulk(b: dict) -> InlineKeyboardMarkup:
         label = "✍️ Caption: Original" if b["mode"] == "original" else "✍️ Caption: Default"
         rows.append([btn(label, "bk_cap")])
         rows.append([btn("▶️ Start", "bk_go")])
+    else:
+        rows.append([btn("🗑 Delete all bulk posts", "bk_delall")])
     rows.append([btn("❌ Cancel", "m_home")])
     return InlineKeyboardMarkup(rows)
 
@@ -1186,10 +1212,11 @@ async def run_publish(bot, chat_id: int, panel_id: int, batch: dict, to_channel:
             if not f or not f.get("photo"):
                 continue
             try:
-                await send_thumb_post(bot, dest, f, manager)
+                sent_msg = await send_thumb_post(bot, dest, f, manager)
                 sent += 1
                 failed_in_row = 0
                 if to_channel:
+                    await db.add_channel_post(t, dest, sent_msg.message_id)
                     await db.mark_batch_posted(batch["id"], t)
             except TelegramError as e:
                 failed_in_row += 1
@@ -1215,6 +1242,32 @@ async def run_publish(bot, chat_id: int, panel_id: int, batch: dict, to_channel:
         await _finish_panel(bot, panel, text, InlineKeyboardMarkup(rows))
     except Exception as e:  # noqa: BLE001
         log.exception("bulk publish failed")
+        try:
+            await _finish_panel(bot, panel, f"❌ <b>Error</b>\n<code>{html.escape(str(e)[:300])}</code>", kb_after())
+        except TelegramError:
+            pass
+    finally:
+        _bulk_jobs.pop(chat_id, None)
+
+
+async def run_delete_all(bot, chat_id: int, panel_id: int):
+    panel = (chat_id, panel_id)
+    job = _bulk_jobs[chat_id]
+    upd = _progress_throttle(bot, panel, _stop_kb())
+    deleted = 0
+    try:
+        tokens = await db.list_bulk_tokens()
+        for i, t in enumerate(tokens, 1):
+            if job["stop"]:
+                break
+            await upd(f"🗑 <b>Deleting…</b> {i}/{len(tokens)}")
+            if await delete_file_everywhere(bot, t):
+                deleted += 1
+        left = len(tokens) - deleted
+        text = f"🗑✅ <b>{deleted}</b> bulk posts delete ho gaye" + (f"\n⏹ Baaki: {left}" if left else "")
+        await _finish_panel(bot, panel, text, kb_after())
+    except Exception as e:  # noqa: BLE001
+        log.exception("bulk delete failed")
         try:
             await _finish_panel(bot, panel, f"❌ <b>Error</b>\n<code>{html.escape(str(e)[:300])}</code>", kb_after())
         except TelegramError:
