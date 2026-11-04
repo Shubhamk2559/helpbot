@@ -209,29 +209,52 @@ function fail(msg) {
   $("retry").hidden = false;
 }
 
-async function api(path) {
+async function api(path, extra) {
   const r = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sid: sid, init_data: tg.initData }),
+    body: JSON.stringify(Object.assign({ sid: sid, init_data: tg.initData, ymid: curYmid }, extra || {})),
   });
   return r.json();
 }
 
 // Monetag SDK: script load hone par window.show_<ZONE> function ban jaata hai
-const SHOW_FN = "show_" + CFG.zoneId;
-function waitForSdk(ms) {
+function waitForSdk(ms, zone) {
+  const fn = "show_" + (zone || CFG.zoneId);
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     (function check() {
-      if (typeof window[SHOW_FN] === "function") return resolve(window[SHOW_FN]);
+      if (typeof window[fn] === "function") return resolve(window[fn]);
       if (Date.now() - t0 > ms) return reject(new Error("sdk missing"));
       setTimeout(check, 100);
     })();
   });
 }
 
+// Optimizer ne default se alag zone chuna ho to uska SDK ab load karo (Monetag docs wala hi tag format)
+function loadZoneSdk(zone, url) {
+  if (typeof window["show_" + zone] === "function") return waitForSdk(100, zone);
+  if (!document.querySelector('script[data-zone="' + zone + '"]')) {
+    const sc = document.createElement("script");
+    sc.src = url; sc.dataset.zone = zone; sc.dataset.sdk = "show_" + zone;
+    sc.onerror = () => { window.__sdkErr = 1; };
+    document.head.appendChild(sc);
+  }
+  return waitForSdk(10000, zone);
+}
+
 let claimed = false, adRunning = false, adStartedAt = 0, watchdog = null;
+let curYmid = null, curZone = CFG.zoneId;
+
+function reportFail(reason) {            // sirf stats + auto-bench; reward par koi asar nahi
+  try { api("/api/ad/fail", { reason: reason }).catch(() => {}); } catch (e) {}
+}
+function failReason(e) {
+  const m = String(errText(e) || "");
+  if (/empty feed/i.test(m)) return "empty_feed";
+  if (/timeout/i.test(m)) return "timeout";
+  return "error";
+}
 
 const LOG = [];
 function log(msg) {
@@ -258,7 +281,7 @@ function playAd(show) {
   setStatus("Ad is playing", "load");
   setSub("Watch till the end to unlock your file");
   adStartedAt = Date.now();
-  log("show() called, zone " + CFG.zoneId);
+  log("show() called, zone " + curZone);
 
   // ad kabhi respond hi na kare to user atka na rahe
   clearTimeout(watchdog);
@@ -266,19 +289,26 @@ function playAd(show) {
     if (claimed) return;
     adRunning = false;
     log("watchdog: no response");
+    reportFail("timeout");
     fail("The ad didn't respond. Please try again.");
   }, 60000);
 
   let p;
-  try { p = show({ ymid: sid }); }
-  catch (e) { clearTimeout(watchdog); adRunning = false; log("throw " + errText(e)); fail("Ad setup failed. Please try again shortly."); return; }
+  try { p = show({ ymid: curYmid, requestVar: "unlock" }); }
+  catch (e) { clearTimeout(watchdog); adRunning = false; log("throw " + errText(e)); reportFail("error"); fail("Ad setup failed. Please try again shortly."); return; }
 
-  Promise.resolve(p).then(() => {
-    // rewarded interstitial: ye tabhi resolve hota hai jab user ne ad dekh liya
-    log("ad watched (resolved)");
+  Promise.resolve(p).then((result) => {
+    // Monetag docs: promise "ad band hone ke baad" resolve hota hai; paid hua ya nahi = result.reward_event_type.
+    // Asli enforcement server par hota hai (AD_VERIFY_MODE=postback); yeh client check sirf honest UX ke liye.
+    log("ad closed (resolved) " + (result && result.reward_event_type ? result.reward_event_type : "no-result"));
     clearTimeout(watchdog);
     adRunning = false;
     if (claimed) return;
+    if (CFG.blockNonValued && result && result.reward_event_type === "non_valued") {
+      reportFail("non_valued");
+      fail("That ad didn't count. Please try again.");
+      return;
+    }
     claimed = true;
     claim();
   }).catch((e) => {
@@ -286,6 +316,7 @@ function playAd(show) {
     adRunning = false;
     const why = errText(e);
     log("rejected: " + why);
+    reportFail(failReason(e));
     fail("No ad could be shown right now" + (CFG.showLog && why ? " (" + String(why).slice(0, 80) + ")" : "") + ". Please try again shortly.");
   });
 }
@@ -293,6 +324,7 @@ function playAd(show) {
 async function startAd(sdkP) {
   const show = await sdkP;
   if (!show) {
+    reportFail(window.__sdkErr ? "blocked" : "timeout");
     if (window.__sdkErr) fail("The ad script was blocked. Turn off AdBlock / Private DNS and try again.");
     else fail("The ad script didn't load. Please check your connection and try again.");
     return;
@@ -357,7 +389,7 @@ async function begin() {
   setStatus("Loading your ad", "load");
   setSub("One short ad unlocks your file");
 
-  const sdkP = waitForSdk(10000).catch(() => null);   // session start ke saath hi SDK load
+  const sdkP0 = waitForSdk(10000).catch(() => null);  // default zone ka SDK session start ke saath hi load
   let s;
   try { s = await api("/api/ad/start"); }
   catch (e) { fail("Network error. Please try again."); return; }
@@ -365,7 +397,10 @@ async function begin() {
   if (!s.ok) { fail(s.error || "Session expired."); return; }
 
   sid = s.sid;
+  curYmid = s.ymid || null;
+  curZone = s.zone || CFG.zoneId;
   setProgress(s.ads_done, s.ads_required);
+  const sdkP = (curZone === CFG.zoneId) ? sdkP0 : loadZoneSdk(curZone, s.sdk).catch(() => null);
   startAd(sdkP);
 }
 
