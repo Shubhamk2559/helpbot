@@ -19,6 +19,7 @@ from telegram import Update
 from telegram.error import Forbidden, TelegramError
 
 import db
+import userbot
 from config import (
     ADS_REQUIRED,
     DIRECT_MINIAPP,
@@ -44,6 +45,7 @@ async def lifespan(_app: FastAPI):
     task = asyncio.create_task(manager.background_loop())
     yield
     task.cancel()
+    await userbot.shutdown()
     await manager.stop()
 
 
