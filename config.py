@@ -82,3 +82,7 @@ STATS_TZ_OFFSET_MIN = int(os.getenv("STATS_TZ_OFFSET_MIN", "330"))
 BULK_MAX_RANGE = int(os.getenv("BULK_MAX_RANGE", "3000"))        # ek baar me max kitne message ids
 BULK_SCAN_DELAY = float(os.getenv("BULK_SCAN_DELAY", "0.4"))     # har message scan ke beech (sec)
 BULK_POST_DELAY = float(os.getenv("BULK_POST_DELAY", "3"))       # channel me 2 posts ke beech (sec)
+
+# True = post ka button seedha t.me/<bot> link kholta hai (Telegram ka "Open Link" confirm box nahi aata).
+# Har post par random active bot chuna jata hai. False = purana /f/ redirect link (confirm box aayega).
+POST_DIRECT_LINK = _bool("POST_DIRECT_LINK", True)
