@@ -33,11 +33,14 @@ from config import (
     BULK_POST_DELAY,
     BULK_SCAN_DELAY,
     CHANNEL_URL,
+    DIRECT_MINIAPP,
     LINK_BASE_URL,
+    MINIAPP_SHORT_NAME,
     OWNER_ID,
     POST_BUTTON_TEXT,
     POST_CAPTION,
     POST_CHANNEL,
+    POST_DIRECT_LINK,
     POST_MAX_VIDEOS,
     PRIMARY_CHANNEL,
     SUPPORT_URL,
@@ -556,7 +559,7 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("POST_CHANNEL env set nahi hai", show_alert=True)
         else:
             try:
-                await send_thumb_post(context.bot, POST_CHANNEL, f)
+                await send_thumb_post(context.bot, POST_CHANNEL, f, manager)
                 await q.answer("📢 Channel me post ho gaya ✅", show_alert=True)
             except TelegramError as e:
                 await q.answer(f"❌ {str(e)[:150]}", show_alert=True)
@@ -815,7 +818,9 @@ async def create_post(q, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         pass
     try:  # ye wahi post hai jo channel me jayega
-        await context.bot.send_photo(chat_id, post["photo"], caption=caption[:1024], reply_markup=post_button(link))
+        await context.bot.send_photo(chat_id, post["photo"], caption=caption[:1024],
+            reply_markup=post_button(await resolve_link(context.application.bot_data["manager"], gtoken)),
+        )
     except TelegramError as e:
         await context.bot.send_message(chat_id, f"⚠️ Preview nahi ban paya: {html.escape(str(e))}", parse_mode=HTML)
 
@@ -846,9 +851,21 @@ BULK_KEY = "bulk"   # context.user_data[BULK_KEY] = {"step", "chat", "start", "e
 _bulk_jobs: dict[int, dict] = {}   # chat_id -> {"stop": bool}  (ek time par ek hi job)
 
 
-async def send_thumb_post(bot, chat_id, f: dict, link: str | None = None):
+async def resolve_link(manager, token: str) -> str:
+    """Post button ka link. POST_DIRECT_LINK=True: seedha t.me link (confirm box nahi), random active bot."""
+    if POST_DIRECT_LINK and manager:
+        names = await manager.active_usernames()
+        if names:
+            u = random.choice(names)
+            if DIRECT_MINIAPP:
+                return f"https://t.me/{u}/{MINIAPP_SHORT_NAME}?startapp={token}" if MINIAPP_SHORT_NAME else f"https://t.me/{u}?startapp={token}"
+            return f"https://t.me/{u}?start={token}"
+    return f"{LINK_BASE_URL}/f/{token}"
+
+
+async def send_thumb_post(bot, chat_id, f: dict, manager=None):
     """Thumbnail (photo / video / gif) + caption + button. Channel post aur preview dono yahi use karte hain."""
-    link = link or f"{LINK_BASE_URL}/f/{f['token']}"
+    link = await resolve_link(manager, f["token"])
     caption = (f.get("post_caption") or POST_CAPTION)[:1024]
     kb = post_button(link)
     fid, kind = f["photo"], f.get("thumb_type") or "photo"
@@ -1147,10 +1164,10 @@ async def bulk_publish_start(q, context: ContextTypes.DEFAULT_TYPE, to_channel: 
         await q.answer("❌ Batch nahi mila", show_alert=True)
         return
     await q.answer("📢 Posting shuru…" if to_channel else "👀 Preview bhej raha hoon…")
-    bg(run_publish(context.bot, chat_id, q.message.message_id, batch, to_channel))
+    bg(run_publish(context.bot, chat_id, q.message.message_id, batch, to_channel, context.application.bot_data["manager"]))
 
 
-async def run_publish(bot, chat_id: int, panel_id: int, batch: dict, to_channel: bool):
+async def run_publish(bot, chat_id: int, panel_id: int, batch: dict, to_channel: bool, manager=None):
     """Batch ke posts order me channel me (ya preview ke liye owner ki chat me) bhejo."""
     panel = (chat_id, panel_id)
     job = _bulk_jobs[chat_id]
@@ -1169,7 +1186,7 @@ async def run_publish(bot, chat_id: int, panel_id: int, batch: dict, to_channel:
             if not f or not f.get("photo"):
                 continue
             try:
-                await send_thumb_post(bot, dest, f)
+                await send_thumb_post(bot, dest, f, manager)
                 sent += 1
                 failed_in_row = 0
                 if to_channel:
