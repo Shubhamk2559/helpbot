@@ -93,3 +93,83 @@ TG_API_ID = int(os.getenv("TG_API_ID", "0").strip() or 0)
 TG_API_HASH = os.getenv("TG_API_HASH", "").strip()
 UB_BATCH = int(os.getenv("UB_BATCH", "20"))        # ek forward call me max kitne messages
 UB_DELAY = float(os.getenv("UB_DELAY", "3"))       # 2 forward calls ke beech (sec). Kam mat karo, account limit ho sakta hai
+
+
+# ======================================================================
+# ---- Monetag Smart Monetization Engine (sab kuch OPTIONAL / backward-compatible) ----
+# Default values = purana behaviour. Kuch bhi set na karo to app pehle jaisa hi chalta hai.
+# ======================================================================
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)).strip())
+    except ValueError:
+        return default
+
+
+def _int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip())
+    except ValueError:
+        return default
+
+
+def _parse_zones(raw: str) -> dict:
+    """'12181474,98765|https://x.com/sdk.js' -> {'12181474': <MONETAG_SDK_URL>, '98765': 'https://x.com/sdk.js'}"""
+    out: dict = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        zone, _, url = part.partition("|")
+        zone = zone.strip()
+        if not zone.isdigit():
+            raise RuntimeError(f"MONETAG_ZONES: '{zone}' is not a numeric zone ID")
+        out[zone] = url.strip() or MONETAG_SDK_URL
+    return out
+
+
+# Sirf MAIN SDK zone IDs (Rewarded Interstitial). Format: zone[|sdk_url],zone[|sdk_url]
+# Khali = sirf MONETAG_ZONE_ID. Sub-zones yahan mat daalo (Monetag docs: SDK me sirf main zone).
+MONETAG_ZONES = _parse_zones(os.getenv("MONETAG_ZONES", ""))
+MONETAG_DEFAULT_ZONE = os.getenv("MONETAG_DEFAULT_ZONE", MONETAG_ZONE_ID).strip() or MONETAG_ZONE_ID
+MONETAG_ZONES.setdefault(MONETAG_ZONE_ID, MONETAG_SDK_URL)
+MONETAG_ZONES.setdefault(MONETAG_DEFAULT_ZONE, MONETAG_SDK_URL)
+if not MONETAG_DEFAULT_ZONE.isdigit():
+    raise RuntimeError("MONETAG_DEFAULT_ZONE must be a numeric zone ID")
+
+# True = historical eCPM ke hisaab se traffic zones me baantna. False (default) = hamesha default zone.
+MONETAG_OPTIMIZE = _bool("MONETAG_OPTIMIZE", False)
+
+# ---- server-side verification ----
+# Monetag SSP -> main zone -> Postback URL:
+#   https://<BASE_URL>/api/monetag/postback?secret=<MONETAG_POSTBACK_SECRET>&ymid={ymid}&event_type={event_type}&reward_event_type={reward_event_type}&zone_id={zone_id}&sub_zone_id={sub_zone_id}&estimated_price={estimated_price}&request_var={request_var}&telegram_id={telegram_id}
+MONETAG_POSTBACK_SECRET = os.getenv("MONETAG_POSTBACK_SECRET", "").strip()
+# legacy   = purana flow (SDK promise resolve + MIN_AD_SECONDS). Postback sirf analytics ke liye.
+# postback = file tabhi milegi jab Monetag ka 'valued' impression postback is ad ke ymid ka aa chuka ho.
+AD_VERIFY_MODE = os.getenv("AD_VERIFY_MODE", "legacy").strip().lower()
+if AD_VERIFY_MODE not in ("legacy", "postback"):
+    raise RuntimeError("AD_VERIFY_MODE must be 'legacy' or 'postback'")
+if AD_VERIFY_MODE == "postback" and not MONETAG_POSTBACK_SECRET:
+    raise RuntimeError("AD_VERIFY_MODE=postback needs MONETAG_POSTBACK_SECRET")
+POSTBACK_WAIT_SECONDS = _int("POSTBACK_WAIT_SECONDS", 20)
+# SDK ne reward_event_type='non_valued' diya (unpaid/fraud/fallback) to file mat do, dobara ad dikhao
+BLOCK_NON_VALUED = _bool("BLOCK_NON_VALUED", True)
+
+# ---- optimizer tuning (conservative defaults for 1k-5k impressions/day) ----
+MONETAG_MIN_IMPRESSIONS = _int("MONETAG_MIN_IMPRESSIONS", 300)    # har zone ke itne impressions (window me) ke baad hi compare
+MONETAG_WINDOW_DAYS = max(1, _int("MONETAG_WINDOW_DAYS", 7))      # rolling window
+MONETAG_EXPLORE_SHARE = min(0.5, max(0.0, _float("MONETAG_EXPLORE_SHARE", 0.2)))  # leader ke alawa zones ko kul traffic
+MONETAG_MIN_SHARE = min(0.2, max(0.0, _float("MONETAG_MIN_SHARE", 0.05)))         # har live zone ko minimum share
+MONETAG_MIN_SWITCH_HOURS = _float("MONETAG_MIN_SWITCH_HOURS", 24)  # 2 leader-switch ke beech kam se kam
+MONETAG_Z_SCORE = _float("MONETAG_Z_SCORE", 1.28)                 # ~90% confidence; badhao = aur conservative
+MONETAG_OPT_INTERVAL = max(60, _int("MONETAG_OPT_INTERVAL", 900))  # optimizer kitni der baad chale (sec)
+# auto-bench: zone ke ads lagatar fail ho rahe ho to thodi der ke liye band
+MONETAG_BENCH_FAIL_RATE = _float("MONETAG_BENCH_FAIL_RATE", 0.6)
+MONETAG_BENCH_MIN_ATTEMPTS = _int("MONETAG_BENCH_MIN_ATTEMPTS", 20)
+MONETAG_BENCH_MINUTES = _int("MONETAG_BENCH_MINUTES", 30)
+
+# ---- analytics access ----
+# GET /admin/monetag (Authorization: Bearer <token>). Khali = HTTP endpoint band (bot panel phir bhi chalta hai).
+MONETAG_ADMIN_TOKEN = os.getenv("MONETAG_ADMIN_TOKEN", "").strip()
+# Optional: proxy ka country header (e.g. CF-IPCountry). Khali = country-wise stats band.
+MONETAG_GEO_HEADER = os.getenv("MONETAG_GEO_HEADER", "").strip()
