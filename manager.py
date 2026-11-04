@@ -11,6 +11,8 @@ from telegram.ext import Application
 
 import db
 import handlers
+import monetag_engine
+import monetag_store
 from config import (
     AUTO_DELETE_SECONDS,
     BASE_URL,
@@ -94,6 +96,10 @@ class BotManager:
     # ---------- lifecycle ----------
     async def start(self):
         await db.init()
+        try:
+            await monetag_store.init()
+        except Exception:  # noqa: BLE001 — analytics indexes fail ho to bhi bot chalna chahiye
+            log.exception("monetag index init failed")
         if ROLE in ("main", "both"):
             self.main = await self._build(MAIN_BOT_TOKEN, handlers.register_main_handlers, "main")
             await self.main.bot.set_webhook(
@@ -113,10 +119,10 @@ class BotManager:
         return self._both_loops()
 
     async def _worker_loops(self):
-        await asyncio.gather(self.sync_loop(), self.cleanup_loop())
+        await asyncio.gather(self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop())
 
     async def _both_loops(self):
-        await asyncio.gather(self.health_loop(), self.sync_loop(), self.cleanup_loop())
+        await asyncio.gather(self.health_loop(), self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop())
 
     # ---------- auto-delete delivered files ----------
     async def cleanup_loop(self):
