@@ -13,6 +13,7 @@ import db
 import handlers
 import monetag_engine
 import monetag_store
+from autoposter import panel as ap_panel
 from config import (
     AUTO_DELETE_SECONDS,
     BASE_URL,
@@ -101,11 +102,15 @@ class BotManager:
         except Exception:  # noqa: BLE001 — analytics indexes fail ho to bhi bot chalna chahiye
             log.exception("monetag index init failed")
         if ROLE in ("main", "both"):
+            # Auto Posting (alag Mongo database). Fail ho to bhi HelpBot chalta rahe.
+            if not await ap_panel.start():
+                log.error("Auto Posting disabled (MongoDB init failed)")
             self.main = await self._build(MAIN_BOT_TOKEN, handlers.register_main_handlers, "main")
             await self.main.bot.set_webhook(
                 url=f"{BASE_URL}/webhook/main",
                 secret_token=self.secret_for("main"),
-                allowed_updates=["message", "callback_query"],
+                # my_chat_member / chat_join_request = Auto Posting (channel add/remove, force-sub)
+                allowed_updates=["message", "callback_query", *ap_panel.EXTRA_ALLOWED_UPDATES],
             )
             self.apps["main"] = self.main
         if ROLE in ("worker", "both"):
@@ -113,16 +118,25 @@ class BotManager:
 
     def background_loop(self):
         if ROLE == "main":
-            return self.health_loop()
+            return self._main_loops()
         if ROLE == "worker":
             return self._worker_loops()
         return self._both_loops()
+
+    async def _autoposter_loops(self):
+        if self.main is not None:
+            await ap_panel.run_loops(self.main.bot)
+
+    async def _main_loops(self):
+        await asyncio.gather(self.health_loop(), self._autoposter_loops())
 
     async def _worker_loops(self):
         await asyncio.gather(self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop())
 
     async def _both_loops(self):
-        await asyncio.gather(self.health_loop(), self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop())
+        await asyncio.gather(
+            self.health_loop(), self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop(), self._autoposter_loops()
+        )
 
     # ---------- auto-delete delivered files ----------
     async def cleanup_loop(self):
@@ -172,6 +186,7 @@ class BotManager:
             except Exception:  # noqa: BLE001
                 pass
         self.apps.clear()
+        await ap_panel.shutdown()
 
     # ---------- WORKER: secondary bots ----------
     async def launch_secondary(self, b: dict):
