@@ -19,6 +19,7 @@ from telegram.ext import (
 
 import db
 import userbot
+from autoposter import panel as ap_panel
 from config import OWNER_ID
 
 log = logging.getLogger("ubot_ui")
@@ -27,7 +28,7 @@ KEY = "ub"            # context.user_data[KEY] = flow state
 PAGE = 8
 _jobs: dict[int, dict] = {}     # chat_id -> {"stop": bool}   (ek time par ek hi copy job)
 _tasks: set = set()
-_ICON = {"saved": "💾", "channel": "📣", "group": "👥", "user": "👤"}
+_ICON = {"saved": "💾", "channel": "📣", "group": "👥", "user": "👤", "bot": "🤖"}
 _owner_private = filters.User(user_id=OWNER_ID) & filters.ChatType.PRIVATE
 
 
@@ -84,8 +85,9 @@ async def _home_screen():
     rows.append([btn("🏠 Menu", "m_home")])
     text = (
         "👤📥 <b>Copy Chats</b>\n\n"
-        "Apne Telegram account se kisi bhi chat ke <b>photo / video / file (caption ke saath)</b> private channel me copy karo — "
-        "<b>forward tag ke bina</b>, download/upload ke bina ⚡\n\n"
+        "Apne Telegram account se kisi bhi chat ke <b>photo / video / file (caption ke saath)</b> copy karo — "
+        "<b>forward tag ke bina</b>, download/upload ke bina ⚡\n"
+        "🎯 Destination: <b>channel</b>, <b>💾 Saved Messages</b> ya koi bhi <b>👤 personal chat</b>\n\n"
         + (f"Accounts: <b>{len(accs)}</b> — jisse copy karna hai usko chuno 👇" if accs else "Abhi koi account nahi. ➕ Add Account dabao.")
     )
     return text, InlineKeyboardMarkup(rows)
@@ -100,7 +102,7 @@ def _setup_text(u: dict, resume_from: int) -> str:
     lines = [
         f"👤 <b>{html.escape(u['acc_name'])}</b>\n",
         f"📂 Source: {nm(u['src'])}",
-        f"📣 Destination: {nm(u['dest'])}\n",
+        f"🎯 Destination: {nm(u['dest'])}\n",
         f"🎯 Copy: {kinds}",
         f"📝 Sirf caption wale: <b>{'ON' if u['cap'] else 'OFF'}</b>",
     ]
@@ -114,7 +116,7 @@ def _setup_kb(u: dict, resume_from: int) -> InlineKeyboardMarkup:
     k = u["kinds"]
     t = lambda f, n: btn(("✅ " if f in k else "▫️ ") + n, f"ub:k:{f}")  # noqa: E731
     rows = [
-        [btn("📂 Source chuno", "ub:pick:src"), btn("📣 Destination chuno", "ub:pick:dest")],
+        [btn("📂 Source chuno", "ub:pick:src"), btn("🎯 Destination chuno", "ub:pick:dest")],
         [t("photo", "Photos"), t("video", "Videos"), t("file", "Files")],
         [btn(("✅ " if u["cap"] else "▫️ ") + "Sirf caption wale", "ub:cap")],
     ]
@@ -136,7 +138,8 @@ async def _show_setup(bot, u: dict):
 
 def _view(u: dict) -> list:
     q = (u.get("query") or "").lower()
-    base = [d for d in u["all"] if d["post"]] if u["mode"] == "dest" else u["all"]
+    # Destination: Saved Messages, personal chats, aur wo channels jaha account post kar sakta hai
+    base = [d for d in u["all"] if d.get("dest", d["post"])] if u["mode"] == "dest" else u["all"]
     return [d for d in base if q in d["title"].lower()] if q else base
 
 
@@ -154,7 +157,7 @@ async def _show_pick(bot, u: dict):
         nav.append(btn("▶️", f"ub:pg:{u['page'] + 1}"))
     rows.append(nav)
     rows.append([btn("⬅️ Back", "ub:back")])
-    what = "📂 <b>Source chat chuno</b>" if u["mode"] == "src" else "📣 <b>Destination channel chuno</b>\n<i>(sirf wo channels jaha tumhare account ko post karne ka haq hai)</i>"
+    what = "📂 <b>Source chat chuno</b>" if u["mode"] == "src" else "🎯 <b>Destination chuno</b>\n<i>(💾 Saved Messages, 👤 personal chats, aur wo 📣 channels jaha tumhare account ko post karne ka haq hai)</i>"
     hint = "\n\n🔎 Naam likh ke search karo, ya <code>@username</code> / t.me link bhejo."
     empty = "\n\n😕 Kuch nahi mila." if not view else ""
     await _edit(bot, u["panel"], f"{what}{hint}{empty}", InlineKeyboardMarkup(rows))
@@ -197,6 +200,7 @@ async def ub_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("🚫 Owner only", show_alert=True)
         return
     bot = context.bot
+    await ap_panel.clear_mode()  # Copy Chats khola = Auto Posting ka pending mode band (text input yahin aayega)
     panel = (q.message.chat_id, q.message.message_id)
     parts = q.data.split(":")
     act = parts[1] if len(parts) > 1 else ""
@@ -335,7 +339,7 @@ def _progress_text(u: dict, r: dict) -> str:
     total = r["total"] or "?"
     return (
         "📥⚡ <b>Copy ho raha hai…</b>\n\n"
-        f"📂 {html.escape(u['src']['title'][:30])} ➜ 📣 {html.escape(u['dest']['title'][:30])}\n\n"
+        f"📂 {html.escape(u['src']['title'][:30])} ➜ {_ICON.get(u['dest']['kind'], '💬')} {html.escape(u['dest']['title'][:30])}\n\n"
         f"🔎 Scanned: <b>{r['scanned']}</b> / {total}\n"
         f"✅ Copied: <b>{r['copied']}</b>\n"
         f"⏭ Skipped: {r['skipped']}" + (f"\n⚠️ Errors: {r['errors']}" if r["errors"] else "")
