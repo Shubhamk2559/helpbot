@@ -27,6 +27,7 @@ import bulk
 import db
 import monetag_store
 import ubot_ui
+from autoposter import panel as ap_panel
 from config import (
     MONETAG_WINDOW_DAYS,
     ADS_REQUIRED,
@@ -296,7 +297,7 @@ def kb_menu() -> InlineKeyboardMarkup:
             [btn("📁 My Files", "f_list:0"), btn("📤 Upload", "m_up")],
             [btn("📝 Create Post", "m_post"), btn("📊 Stats", "m_stats")],
             [btn("🗂 Bulk Posts", "m_bulk"), btn("👤 Copy Chats", "ub:home")],
-            [btn("💰 Monetag", "m_monetag")],
+            [btn("💰 Monetag", "m_monetag"), btn("🤖 Auto Posting", "ap:nav:dashboard")],
         ]
     )
 
@@ -440,6 +441,7 @@ async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(POST_KEY, None)
     context.user_data.pop(BULK_KEY, None)
     ubot_ui.clear(context)
+    await ap_panel.clear_mode()  # Auto Posting ka upload/footer jaisa koi mode ho to band
     await update.effective_message.reply_text(menu_text(await stats_line()), parse_mode=HTML, reply_markup=kb_menu())
 
 
@@ -469,6 +471,7 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         await q.answer()
         return
+    await ap_panel.clear_mode()  # koi bhi menu button = Auto Posting ka pending mode (upload/footer...) band
     if data != "m_add":
         context.user_data.pop(AWAIT_KEY, None)  # koi bhi aur button = token input cancel
     if data not in ("m_post", "p_done"):
@@ -1295,6 +1298,8 @@ def register_main_handlers(app: Application):
     app.add_handler(CommandHandler("start", start_router))
     # --- Copy Chats (userbot) ---
     ubot_ui.register(app)
+    # --- Auto Posting (owner ke /cancel /done /register + "ap:" panel buttons); owner ke generic /command se pehle ---
+    ap_panel.register(app, on_cancel=send_menu)
     # --- owner panel (sirf owner) ---
     app.add_handler(
         CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|pc:|p_done$|noop$|bk_)")
