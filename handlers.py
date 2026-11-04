@@ -25,8 +25,10 @@ from telegram.ext import (
 
 import bulk
 import db
+import monetag_store
 import ubot_ui
 from config import (
+    MONETAG_WINDOW_DAYS,
     ADS_REQUIRED,
     BACKUP_CHANNEL,
     BASE_URL,
@@ -294,6 +296,7 @@ def kb_menu() -> InlineKeyboardMarkup:
             [btn("📁 My Files", "f_list:0"), btn("📤 Upload", "m_up")],
             [btn("📝 Create Post", "m_post"), btn("📊 Stats", "m_stats")],
             [btn("🗂 Bulk Posts", "m_bulk"), btn("👤 Copy Chats", "ub:home")],
+            [btn("💰 Monetag", "m_monetag")],
         ]
     )
 
@@ -479,6 +482,14 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "m_stats":
         await q.answer()
         await show(q, await stats_text(), kb_menu_only())
+    elif data == "m_monetag":
+        await q.answer()
+        try:
+            text = monetag_store.format_report_html(await monetag_store.build_report(MONETAG_WINDOW_DAYS))
+        except Exception:  # noqa: BLE001
+            log.exception("monetag report failed")
+            text = "💰 Monetag stats abhi load nahi ho paye. Thodi der baad try karo."
+        await show(q, text, kb_menu_only())
     elif data == "m_up":
         await q.answer()
         await show(
