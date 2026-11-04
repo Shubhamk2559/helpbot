@@ -3,6 +3,7 @@ import html
 import logging
 import random
 import secrets
+import time
 
 from telegram import (
     CopyTextButton,
@@ -22,11 +23,15 @@ from telegram.ext import (
     filters,
 )
 
+import bulk
 import db
 from config import (
     ADS_REQUIRED,
     BACKUP_CHANNEL,
     BASE_URL,
+    BULK_MAX_RANGE,
+    BULK_POST_DELAY,
+    BULK_SCAN_DELAY,
     CHANNEL_URL,
     LINK_BASE_URL,
     OWNER_ID,
@@ -284,6 +289,7 @@ def kb_menu() -> InlineKeyboardMarkup:
         [
             [btn("📁 My Files", "f_list:0"), btn("📤 Upload", "m_up")],
             [btn("📝 Create Post", "m_post"), btn("📊 Stats", "m_stats")],
+            [btn("🗂 Bulk Posts", "m_bulk")],
         ]
     )
 
@@ -423,6 +429,7 @@ async def show(q, text: str, kb: InlineKeyboardMarkup):
 async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(AWAIT_KEY, None)
     context.user_data.pop(POST_KEY, None)
+    context.user_data.pop(BULK_KEY, None)
     await update.effective_message.reply_text(menu_text(await stats_line()), parse_mode=HTML, reply_markup=kb_menu())
 
 
@@ -455,6 +462,8 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(AWAIT_KEY, None)  # koi bhi aur button = token input cancel
     if data not in ("m_post", "p_done"):
         context.user_data.pop(POST_KEY, None)   # koi bhi aur button = post banana cancel
+    if data not in ("m_bulk", "bk_cap", "bk_go"):
+        context.user_data.pop(BULK_KEY, None)   # koi bhi aur button = bulk setup cancel
 
     if data == "m_home":
         await q.answer()
@@ -547,15 +556,25 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("POST_CHANNEL env set nahi hai", show_alert=True)
         else:
             try:
-                await context.bot.send_photo(
-                    POST_CHANNEL,
-                    f["photo"],
-                    caption=(f.get("post_caption") or POST_CAPTION)[:1024],
-                    reply_markup=post_button(f"{LINK_BASE_URL}/f/{f['token']}"),
-                )
+                await send_thumb_post(context.bot, POST_CHANNEL, f)
                 await q.answer("📢 Channel me post ho gaya ✅", show_alert=True)
             except TelegramError as e:
                 await q.answer(f"❌ {str(e)[:150]}", show_alert=True)
+    elif data == "m_bulk":
+        await bulk_open(q, context)
+    elif data == "bk_cap":
+        await bulk_toggle_caption(q, context)
+    elif data == "bk_go":
+        await bulk_go(q, context)
+    elif data == "bk_stop":
+        job = _bulk_jobs.get(q.message.chat_id)
+        if job:
+            job["stop"] = True
+            await q.answer("⏹ Rok raha hoon… (abhi ka step khatam hone do)", show_alert=True)
+        else:
+            await q.answer("Koi job nahi chal raha")
+    elif data.startswith("bk_pub:") or data.startswith("bk_prev:"):
+        await bulk_publish_start(q, context, to_channel=data.startswith("bk_pub:"), batch_id=data.split(":", 1)[1])
     elif data.startswith("f_list:"):
         await q.answer()
         await show(q, *await files_screen(int(data.split(":")[1])))
@@ -594,6 +613,14 @@ async def owner_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await manager.add_bot(token)
         await edit(status, html.escape(result), kb_after(btn("➕ Add another", "m_add")))
         return
+    b = context.user_data.get(BULK_KEY)
+    if b is not None:
+        if b["step"] in ("start", "end"):
+            await bulk_link_input(update, context, b)
+        else:
+            bg(react(msg, "🤔"))
+            await msg.reply_text("▶️ <b>Start</b> dabao (ya Cancel).", parse_mode=HTML)
+        return
     if context.user_data.get(POST_KEY) is not None:
         bg(react(msg, "🤔"))
         await msg.reply_text("📝 Post banane ke liye <b>image / video</b> bhejo, phir ✅ Create Post dabao.", parse_mode=HTML)
@@ -606,6 +633,10 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if context.user_data.get(POST_KEY) is not None:   # Create Post mode: bas collect karo
         await post_collect(update, context)
+        return
+    if context.user_data.get(BULK_KEY) is not None:   # Bulk mode: upload nahi, sirf link chahiye
+        bg(react(msg, "🤔"))
+        await msg.reply_text("🗂 Bulk Posts me <b>file nahi</b>, channel post ka <b>link</b> bhejo.", parse_mode=HTML)
         return
     context.user_data.pop(AWAIT_KEY, None)
     status = await msg.reply_text("⏳💾 <b>Uploading & backing up…</b>", parse_mode=HTML)
@@ -716,16 +747,20 @@ async def post_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def store_to_channels(bot, from_chat: int, msg_id: int, caption: str, label: str):
     """Primary + backup channel me save. Primary fail = TelegramError. Return (locations, warn)."""
-    a = await bot.copy_message(
-        chat_id=PRIMARY_CHANNEL,
-        from_chat_id=from_chat,
-        message_id=msg_id,
-        caption=f"{caption}\n\nID: {label}".strip(),
+    a = await bulk.with_retry(
+        lambda: bot.copy_message(
+            chat_id=PRIMARY_CHANNEL,
+            from_chat_id=from_chat,
+            message_id=msg_id,
+            caption=f"{caption}\n\nID: {label}".strip(),
+        )
     )
     locations = [{"channel": PRIMARY_CHANNEL, "msg": a.message_id}]
     warn = ""
     try:
-        b = await bot.copy_message(chat_id=BACKUP_CHANNEL, from_chat_id=PRIMARY_CHANNEL, message_id=a.message_id)
+        b = await bulk.with_retry(
+            lambda: bot.copy_message(chat_id=BACKUP_CHANNEL, from_chat_id=PRIMARY_CHANNEL, message_id=a.message_id)
+        )
         locations.append({"channel": BACKUP_CHANNEL, "msg": b.message_id})
     except TelegramError as e:
         warn = str(e)
@@ -804,12 +839,379 @@ async def create_post(q, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------- Bulk Posts: channel ki range (start link -> end link) -> kai posts ----------
+# Channel pattern:  [caption wala post = thumbnail] + [niche ke bina-caption videos]  (baar-baar)
+# Har group ka bot ek link banata hai; thumbnail ke niche button = wo link.
+BULK_KEY = "bulk"   # context.user_data[BULK_KEY] = {"step", "chat", "start", "end", "mode", "panel"}
+_bulk_jobs: dict[int, dict] = {}   # chat_id -> {"stop": bool}  (ek time par ek hi job)
+
+
+async def send_thumb_post(bot, chat_id, f: dict, link: str | None = None):
+    """Thumbnail (photo / video / gif) + caption + button. Channel post aur preview dono yahi use karte hain."""
+    link = link or f"{LINK_BASE_URL}/f/{f['token']}"
+    caption = (f.get("post_caption") or POST_CAPTION)[:1024]
+    kb = post_button(link)
+    fid, kind = f["photo"], f.get("thumb_type") or "photo"
+    if kind == "video":
+        return await bulk.with_retry(lambda: bot.send_video(chat_id, fid, caption=caption, reply_markup=kb))
+    if kind == "animation":
+        return await bulk.with_retry(lambda: bot.send_animation(chat_id, fid, caption=caption, reply_markup=kb))
+    return await bulk.with_retry(lambda: bot.send_photo(chat_id, fid, caption=caption, reply_markup=kb))
+
+
+def bulk_panel_text(b: dict) -> str:
+    if b["step"] == "start":
+        return (
+            "🗂 <b>Bulk Posts</b>\n\n"
+            "Channel ke <b>caption wale post</b> (thumbnail) + uske niche ke <b>bina-caption videos</b> se "
+            "bot khud posts banayega: thumbnail ke niche 1 button, jo un sab videos ka link hoga 🔗\n\n"
+            "1️⃣ Channel ke <b>pehle post</b> ka link bhejo\n"
+            "<i>(post par long-press → Copy Link)</i>\n\n"
+            "👑 Bot us channel ka <b>admin</b> hona chahiye."
+        )
+    if b["step"] == "end":
+        return (
+            "🗂 <b>Bulk Posts</b>\n\n"
+            f"✅ Start post: <code>{b['start']}</code>\n\n"
+            "2️⃣ Ab <b>aakhri post</b> ka link bhejo (usi channel ka)"
+        )
+    n = b["end"] - b["start"] + 1
+    cap = "Original (channel wala)" if b["mode"] == "original" else "Default (POST_CAPTION)"
+    return (
+        "🗂 <b>Bulk Posts — ready</b>\n\n"
+        f"📍 Range: <code>{b['start']}</code> → <code>{b['end']}</code>  (<b>{n}</b> messages)\n"
+        f"✍️ Post caption: <b>{cap}</b>\n\n"
+        "Caption wala photo/video = thumbnail • uske niche ke bina-caption videos = ek link.\n"
+        "Pehle se bane posts skip ho jayenge.\n\n"
+        "▶️ <b>Start</b> dabao 👇"
+    )
+
+
+def kb_bulk(b: dict) -> InlineKeyboardMarkup:
+    rows = []
+    if b["step"] == "ready":
+        label = "✍️ Caption: Original" if b["mode"] == "original" else "✍️ Caption: Default"
+        rows.append([btn(label, "bk_cap")])
+        rows.append([btn("▶️ Start", "bk_go")])
+    rows.append([btn("❌ Cancel", "m_home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _stop_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[btn("⏹ Stop", "bk_stop")]])
+
+
+async def _edit_panel(bot, panel, text: str, kb=None):
+    try:
+        await bot.edit_message_text(text, chat_id=panel[0], message_id=panel[1], parse_mode=HTML, reply_markup=kb)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            log.warning("panel edit failed: %s", e)
+    except TelegramError as e:
+        log.warning("panel edit failed: %s", e)
+
+
+async def _finish_panel(bot, panel, text: str, kb=None):
+    """Progress panel hata ke result sabse neeche naye message me (preview/posts ke baad dikhe)."""
+    try:
+        await bot.delete_message(panel[0], panel[1])
+    except TelegramError:
+        pass
+    await bot.send_message(panel[0], text, parse_mode=HTML, reply_markup=kb)
+
+
+def _progress_throttle(bot, panel, kb):
+    last = 0.0
+
+    async def upd(text: str, force: bool = False):
+        nonlocal last
+        now = time.monotonic()
+        if force or now - last >= 3:
+            last = now
+            await _edit_panel(bot, panel, text, kb)
+
+    return upd
+
+
+async def bulk_open(q, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = q.message.chat_id
+    if chat_id in _bulk_jobs:
+        await q.answer("⏳ Ek bulk job abhi chal raha hai", show_alert=True)
+        return
+    await q.answer()
+    b = {"step": "start", "mode": "default", "panel": (chat_id, q.message.message_id)}
+    context.user_data[BULK_KEY] = b
+    await show(q, bulk_panel_text(b), kb_bulk(b))
+
+
+async def bulk_refresh(bot, b: dict):
+    await _edit_panel(bot, b["panel"], bulk_panel_text(b), kb_bulk(b))
+
+
+async def bulk_toggle_caption(q, context: ContextTypes.DEFAULT_TYPE):
+    b = context.user_data.get(BULK_KEY)
+    if not b or b["step"] != "ready":
+        await q.answer("Pehle start/end link bhejo", show_alert=True)
+        return
+    await q.answer()
+    b["mode"] = "default" if b["mode"] == "original" else "original"
+    await bulk_refresh(context.bot, b)
+
+
+async def bulk_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE, b: dict):
+    msg = update.effective_message
+    parsed = bulk.parse_link(msg.text or "")
+    if not parsed:
+        bg(react(msg, "🤔"))
+        await msg.reply_text(
+            "❌ Ye post link nahi lag raha.\nPost par long-press → <b>Copy Link</b> → yahan paste karo.\n"
+            "Example: <code>https://t.me/c/1234567890/15</code>",
+            parse_mode=HTML,
+        )
+        return
+    chat, mid = parsed
+    if b["step"] == "end" and chat != b["chat"]:
+        bg(react(msg, "🤔"))
+        await msg.reply_text("❌ Ye link <b>dusre channel</b> ka hai. Start wale channel ka hi link bhejo.", parse_mode=HTML)
+        return
+    ok, err = await bulk.probe(context.bot, chat, mid, msg.chat_id)
+    if not ok:
+        bg(react(msg, "😢"))
+        await msg.reply_text(f"❌ {html.escape(err or 'Unknown error')}", parse_mode=HTML)
+        return
+    if b["step"] == "start":
+        b.update(chat=chat, start=mid, step="end")
+    else:
+        lo, hi = sorted((b["start"], mid))
+        if hi - lo + 1 > BULK_MAX_RANGE:
+            bg(react(msg, "😢"))
+            await msg.reply_text(
+                f"❌ Range bahut badi hai ({hi - lo + 1}). Ek baar me max <b>{BULK_MAX_RANGE}</b> messages. "
+                "Chhota end link bhejo.",
+                parse_mode=HTML,
+            )
+            return
+        b.update(start=lo, end=hi, step="ready")
+    bg(react(msg, "👍"))
+    await bulk_refresh(context.bot, b)
+
+
+async def bulk_go(q, context: ContextTypes.DEFAULT_TYPE):
+    b = context.user_data.get(BULK_KEY)
+    chat_id = q.message.chat_id
+    if not b or b["step"] != "ready":
+        await q.answer("Pehle start/end link bhejo", show_alert=True)
+        return
+    if chat_id in _bulk_jobs:
+        await q.answer("⏳ Ek bulk job abhi chal raha hai", show_alert=True)
+        return
+    context.user_data.pop(BULK_KEY, None)
+    _bulk_jobs[chat_id] = {"stop": False}
+    await q.answer("🚀 Shuru!")
+    bg(run_bulk(context.bot, chat_id, q.message.message_id, b))
+
+
+async def run_bulk(bot, chat_id: int, panel_id: int, b: dict):
+    panel = (chat_id, panel_id)
+    job = _bulk_jobs[chat_id]
+    upd = _progress_throttle(bot, panel, _stop_kb())
+    total_msgs = b["end"] - b["start"] + 1
+
+    async def on_scan(n: int, total: int, groups: int):
+        await upd(f"🔎 <b>Scanning…</b> {n}/{total}\n📝 Caption-posts mile: <b>{groups}</b>")
+
+    try:
+        await upd(f"🔎 <b>Scanning shuru…</b> 0/{total_msgs}", force=True)
+        res = await bulk.scan(bot, b["chat"], b["start"], b["end"], chat_id, job, on_scan, BULK_SCAN_DELAY)
+
+        if res.aborted:
+            await _finish_panel(bot, panel, f"❌ <b>Scan ruk gaya</b>\n<code>{html.escape(res.aborted)}</code>", kb_after())
+            return
+        if res.stopped:
+            await _finish_panel(bot, panel, "⏹ <b>Scan rok diya.</b> Kuch save nahi hua.", kb_after())
+            return
+
+        made = videos = dup = empty = failed = warns = 0
+        tokens: list[str] = []
+        consecutive_fail = 0
+        last_err = ""
+        stopped = False
+        total_g = len(res.groups)
+
+        for gi, g in enumerate(res.groups, 1):
+            if job["stop"]:
+                stopped = True
+                break
+            await upd(
+                f"💾 <b>Saving posts…</b> {gi}/{total_g}\n"
+                f"✅ Bane: <b>{made}</b> • 🎬 Videos: <b>{videos}</b>"
+            )
+            if not g.items:
+                empty += 1
+                continue
+            if await db.find_post_by_source(b["chat"], g.head.msg_id):
+                dup += 1
+                continue
+
+            gtoken = secrets.token_urlsafe(6)
+            items: list[dict] = []
+            try:
+                for i, it in enumerate(g.items, 1):
+                    locs, warn = await store_to_channels(bot, b["chat"], it.msg_id, it.caption[:900], f"{gtoken} #{i}")
+                    items.append({"locations": locs, "caption": it.caption[:900]})
+                    warns += 1 if warn else 0
+                    await asyncio.sleep(0.3)
+            except TelegramError as e:
+                for it in items:  # adhura group wapas hata do
+                    for loc in it["locations"]:
+                        try:
+                            await bot.delete_message(loc["channel"], loc["msg"])
+                        except TelegramError:
+                            pass
+                failed += 1
+                consecutive_fail += 1
+                last_err = str(e)
+                if consecutive_fail >= 3:
+                    break
+                continue
+            consecutive_fail = 0
+
+            caption = (g.head.caption[:1024] if b["mode"] == "original" else POST_CAPTION)
+            await db.save_post(
+                gtoken, items, caption, g.head.file_id,
+                thumb_type=g.head.kind, src_chat=b["chat"], src_head=g.head.msg_id,
+            )
+            tokens.append(gtoken)
+            made += 1
+            videos += len(items)
+
+        lines = [
+            "✅🎉 <b>Bulk done!</b>" if not stopped else "⏹ <b>Bulk rok diya</b> (jo ban chuka wo save hai)",
+            "",
+            f"📝 Posts bane: <b>{made}</b>",
+            f"🎬 Videos saved: <b>{videos}</b>",
+        ]
+        if dup:
+            lines.append(f"⏭ Pehle se bane the (skip): {dup}")
+        if empty:
+            lines.append(f"🚫 Niche video nahi mila (skip): {empty}")
+        if res.orphans:
+            lines.append(f"↩️ Pehle caption-post se pehle ke videos (skip): {res.orphans}")
+        if res.missing:
+            lines.append(f"🕳 Deleted / missing messages: {res.missing}")
+        if warns:
+            lines.append(f"⚠️ Backup copy fail: {warns} video")
+        if res.errors:
+            lines.append(f"⚠️ Scan errors: {res.errors} (<code>{html.escape(res.last_error[:120])}</code>)")
+        if failed:
+            lines.append(f"❌ Fail: {failed} post — <code>{html.escape(last_err[:150])}</code>")
+            lines.append("👑 Bot ko Primary + Backup dono channels ka admin banao.")
+        rows = []
+        if tokens:
+            batch_id = secrets.token_urlsafe(5)
+            await db.save_batch(batch_id, tokens)
+            if POST_CHANNEL:
+                rows.append([btn(f"📢 Post all to channel ({len(tokens)})", f"bk_pub:{batch_id}")])
+            else:
+                lines.append("\nℹ️ Channel me seedha daalne ke liye <b>POST_CHANNEL</b> env set karo.")
+            rows.append([btn("👀 Preview (mujhe bhejo)", f"bk_prev:{batch_id}")])
+        rows.append([btn("📁 My Files", "f_list:0"), btn("🏠 Menu", "m_home")])
+        await _finish_panel(bot, panel, "\n".join(lines), InlineKeyboardMarkup(rows))
+    except Exception as e:  # noqa: BLE001
+        log.exception("bulk failed")
+        try:
+            await _finish_panel(
+                bot, panel,
+                f"❌ <b>Bulk me error</b>\n<code>{html.escape(str(e)[:300])}</code>\n\n"
+                "Jo posts ban chuke hain wo save hain; dobara run karoge to skip ho jayenge.",
+                kb_after(),
+            )
+        except TelegramError:
+            pass
+    finally:
+        _bulk_jobs.pop(chat_id, None)
+
+
+async def bulk_publish_start(q, context: ContextTypes.DEFAULT_TYPE, to_channel: bool, batch_id: str):
+    chat_id = q.message.chat_id
+    if to_channel and not POST_CHANNEL:
+        await q.answer("POST_CHANNEL env set nahi hai", show_alert=True)
+        return
+    if chat_id in _bulk_jobs:
+        await q.answer("⏳ Ek job abhi chal raha hai", show_alert=True)
+        return
+    _bulk_jobs[chat_id] = {"stop": False}
+    batch = await db.get_batch(batch_id)
+    if not batch:
+        _bulk_jobs.pop(chat_id, None)
+        await q.answer("❌ Batch nahi mila", show_alert=True)
+        return
+    await q.answer("📢 Posting shuru…" if to_channel else "👀 Preview bhej raha hoon…")
+    bg(run_publish(context.bot, chat_id, q.message.message_id, batch, to_channel))
+
+
+async def run_publish(bot, chat_id: int, panel_id: int, batch: dict, to_channel: bool):
+    """Batch ke posts order me channel me (ya preview ke liye owner ki chat me) bhejo."""
+    panel = (chat_id, panel_id)
+    job = _bulk_jobs[chat_id]
+    dest = POST_CHANNEL if to_channel else chat_id
+    already = set(batch.get("posted", [])) if to_channel else set()
+    todo = [t for t in batch["tokens"] if t not in already]
+    upd = _progress_throttle(bot, panel, _stop_kb())
+    sent = failed_in_row = 0
+    last_err = ""
+    try:
+        await upd(f"{'📢' if to_channel else '👀'} <b>Posting…</b> 0/{len(todo)}", force=True)
+        for i, t in enumerate(todo, 1):
+            if job["stop"]:
+                break
+            f = await db.get_file(t)
+            if not f or not f.get("photo"):
+                continue
+            try:
+                await send_thumb_post(bot, dest, f)
+                sent += 1
+                failed_in_row = 0
+                if to_channel:
+                    await db.mark_batch_posted(batch["id"], t)
+            except TelegramError as e:
+                failed_in_row += 1
+                last_err = str(e)
+                if failed_in_row >= 3:
+                    break
+            await upd(f"{'📢' if to_channel else '👀'} <b>Posting…</b> {i}/{len(todo)}")
+            await asyncio.sleep(BULK_POST_DELAY if to_channel else 0.8)
+
+        left = len(todo) - sent
+        where = "channel me" if to_channel else "tumhari chat me"
+        text = f"{'📢' if to_channel else '👀'} <b>{sent}/{len(todo)}</b> posts {where} bhej diye ✅"
+        if left:
+            text += f"\n⚠️ Baaki: {left}" + (f"\n<code>{html.escape(last_err[:150])}</code>" if last_err else "")
+            if last_err:
+                text += "\n👑 Bot POST_CHANNEL ka admin hai? (Post messages permission)"
+        rows = []
+        if to_channel and left:
+            rows.append([btn("🔁 Baaki post karo", f"bk_pub:{batch['id']}")])
+        if not to_channel and POST_CHANNEL:
+            rows.append([btn("📢 Post all to channel", f"bk_pub:{batch['id']}")])
+        rows.append([btn("📁 My Files", "f_list:0"), btn("🏠 Menu", "m_home")])
+        await _finish_panel(bot, panel, text, InlineKeyboardMarkup(rows))
+    except Exception as e:  # noqa: BLE001
+        log.exception("bulk publish failed")
+        try:
+            await _finish_panel(bot, panel, f"❌ <b>Error</b>\n<code>{html.escape(str(e)[:300])}</code>", kb_after())
+        except TelegramError:
+            pass
+    finally:
+        _bulk_jobs.pop(chat_id, None)
+
+
 def register_main_handlers(app: Application):
     # /start Telegram ka built-in entry hai (link kholne par khud lagta hai). Baaki sab buttons.
     app.add_handler(CommandHandler("start", start_router))
     # --- owner panel (sirf owner) ---
     app.add_handler(
-        CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|pc:|p_done$|noop$)")
+        CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|pc:|p_done$|noop$|bk_)")
     )
     app.add_handler(MessageHandler(owner_only & filters.ATTACHMENT & ~filters.COMMAND, upload))
     app.add_handler(MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, owner_text))
