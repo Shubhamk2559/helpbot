@@ -25,6 +25,7 @@ from telegram.ext import (
 
 import bulk
 import db
+import ubot_ui
 from config import (
     ADS_REQUIRED,
     BACKUP_CHANNEL,
@@ -292,7 +293,7 @@ def kb_menu() -> InlineKeyboardMarkup:
         [
             [btn("📁 My Files", "f_list:0"), btn("📤 Upload", "m_up")],
             [btn("📝 Create Post", "m_post"), btn("📊 Stats", "m_stats")],
-            [btn("🗂 Bulk Posts", "m_bulk")],
+            [btn("🗂 Bulk Posts", "m_bulk"), btn("👤 Copy Chats", "ub:home")],
         ]
     )
 
@@ -435,6 +436,7 @@ async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(AWAIT_KEY, None)
     context.user_data.pop(POST_KEY, None)
     context.user_data.pop(BULK_KEY, None)
+    ubot_ui.clear(context)
     await update.effective_message.reply_text(menu_text(await stats_line()), parse_mode=HTML, reply_markup=kb_menu())
 
 
@@ -459,6 +461,7 @@ async def on_owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = q.data
     manager = context.application.bot_data["manager"]
+    ubot_ui.clear(context)  # koi bhi menu button = Copy Chats setup/login cancel
 
     if data == "noop":
         await q.answer()
@@ -1279,6 +1282,8 @@ async def run_delete_all(bot, chat_id: int, panel_id: int):
 def register_main_handlers(app: Application):
     # /start Telegram ka built-in entry hai (link kholne par khud lagta hai). Baaki sab buttons.
     app.add_handler(CommandHandler("start", start_router))
+    # --- Copy Chats (userbot) ---
+    ubot_ui.register(app)
     # --- owner panel (sirf owner) ---
     app.add_handler(
         CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|pc:|p_done$|noop$|bk_)")
