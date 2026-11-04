@@ -77,3 +77,8 @@ POST_CHANNEL = (int(_pc) if _pc.lstrip("-").isdigit() else _pc) if _pc else None
 POST_MAX_VIDEOS = int(os.getenv("POST_MAX_VIDEOS", "10"))
 # "Aaj" ka din kis timezone me ginna hai (minutes, UTC se). India = 330
 STATS_TZ_OFFSET_MIN = int(os.getenv("STATS_TZ_OFFSET_MIN", "330"))
+
+# ---- Bulk Posts (manager bot): channel ki range scan karke posts banana ----
+BULK_MAX_RANGE = int(os.getenv("BULK_MAX_RANGE", "3000"))        # ek baar me max kitne message ids
+BULK_SCAN_DELAY = float(os.getenv("BULK_SCAN_DELAY", "0.4"))     # har message scan ke beech (sec)
+BULK_POST_DELAY = float(os.getenv("BULK_POST_DELAY", "3"))       # channel me 2 posts ke beech (sec)
