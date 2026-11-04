@@ -203,6 +203,19 @@ async def save_post(
 
 
 # ---------- bulk import ----------
+_BULK_Q = {"src_chat": {"$exists": True, "$ne": None}}
+
+
+async def list_bulk_tokens() -> list:
+    docs = await files.find(_BULK_Q, {"token": 1}).sort("created_at", 1).to_list(length=None)
+    return [x["token"] for x in docs]
+
+
+async def add_channel_post(token: str, channel, msg_id: int):
+    """POST_CHANNEL me gaye post ka message id (baad me delete karne ke liye)."""
+    await files.update_one({"token": token}, {"$push": {"channel_posts": {"channel": channel, "msg": msg_id}}})
+
+
 async def find_post_by_source(src_chat, src_head: int):
     """Is source post se pehle hi post ban chuka hai? (dobara run par duplicate se bachao)"""
     return await files.find_one({"src_chat": src_chat, "src_head": src_head})
