@@ -51,6 +51,7 @@ from config import (
     VERIFY_REQUIRED,
 )
 from delivery import send_file
+from ads import panel as ads_panel, settings as ads_settings
 
 log = logging.getLogger("handlers")
 HTML = ParseMode.HTML
@@ -299,6 +300,7 @@ def kb_menu() -> InlineKeyboardMarkup:
             [btn("🗂 Bulk Posts", "m_bulk"), btn("👤 Copy Chats", "ub:home")],
             [btn("💰 Monetag", "m_monetag"), btn("🤖 Auto Posting", "ap:nav:dashboard")],
         ]
+        + ([[btn("🧠 Smart Ads", "sa:home")]] if ads_settings.SMART_ADS_ENABLED else [])
     )
 
 
@@ -1300,6 +1302,9 @@ def register_main_handlers(app: Application):
     ubot_ui.register(app)
     # --- Auto Posting (owner ke /cancel /done /register + "ap:" panel buttons); owner ke generic /command se pehle ---
     ap_panel.register(app, on_cancel=send_menu)
+    # --- Smart Ads (owner only, checked inside) ---
+    if ads_settings.SMART_ADS_ENABLED:
+        ads_panel.register(app, OWNER_ID, f"{BASE_URL}/admin/ads" if ads_settings.ADS_ADMIN_TOKEN else None)
     # --- owner panel (sirf owner) ---
     app.add_handler(
         CallbackQueryHandler(on_owner_callback, pattern=r"^(m_|b[decr]?:|brc:|f_list:|f:|fd:|fdc:|pc:|p_done$|noop$|bk_)")
