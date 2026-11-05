@@ -388,6 +388,7 @@ async function begin() {
   if (!tg.initData) { fail("Please open this inside Telegram."); return; }
   setStatus("Loading your ad", "load");
   setSub("One short ad unlocks your file");
+  if (CFG.smart) { smartBegin(); return; }   // multi-network flow (SMART_ADS_ENABLED); otherwise the original Monetag flow below
 
   const sdkP0 = waitForSdk(10000).catch(() => null);  // default zone ka SDK session start ke saath hi load
   let s;
@@ -402,6 +403,58 @@ async function begin() {
   setProgress(s.ads_done, s.ads_required);
   const sdkP = (curZone === CFG.zoneId) ? sdkP0 : loadZoneSdk(curZone, s.sdk).catch(() => null);
   startAd(sdkP);
+}
+
+// ---------------- smart multi-network flow (only used when CFG.smart) ----------------
+function sapi(path, extra) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(Object.assign({ sid: sid, init_data: tg.initData }, extra || {})),
+  }).then((r) => r.json());
+}
+function loadSmartLib() {              // adapters are fetched only when needed
+  if (window.SmartAds) return Promise.resolve(window.SmartAds);
+  return new Promise((res, rej) => {
+    const sc = document.createElement("script");
+    sc.src = "/ads/adapters.js"; sc.onload = () => res(window.SmartAds); sc.onerror = () => rej(new Error("adapters"));
+    document.head.appendChild(sc);
+  });
+}
+async function smartBegin() {
+  let S, s;
+  try { S = await loadSmartLib(); } catch (e) { fail("Couldn't load. Please check your connection and try again."); return; }
+  try { s = await sapi("/api/smart/start"); } catch (e) { fail("Network error. Please try again."); return; }
+  if (s.code === "no_write") { needWrite(s.bot); return; }
+  if (!s.ok) { fail(s.error || "Session expired."); return; }
+  sid = s.sid;
+  setProgress(s.ads_done, s.ads_required);
+  const adapters = S.createAdapters(S.browserEnv(window));
+  const out = await S.runChain(s, adapters, sapi, {
+    loading: () => { setStatus("Loading your ad", "load"); setSub("One short ad unlocks your file"); },
+    shown: () => { setStatus("Ad is playing", "load"); setSub("Watch till the end to unlock your file"); },
+  });
+  if (out.kind === "skipped") { fail("The ad was closed before the end. Please try again."); return; }
+  if (out.kind !== "completed") {
+    fail(out.displayed ? "The ad was interrupted. Please try again." : "No ad is available right now. Please try again shortly.");
+    return;
+  }
+  setStatus("Verifying", "load");
+  setSub("Confirming your ad view");
+  let r;
+  try { r = await S.claim(out.state, out.res, sapi, (ms) => new Promise((x) => setTimeout(x, ms))); }
+  catch (e) { fail("Network error. Please try again."); return; }
+  if (!r.ok) { fail(r.error || "Verification failed."); return; }
+  setProgress(r.ads_done, r.ads_required);
+  if (r.delivered) {
+    setIcon("done");
+    setStatus("Sent! Check your chat.");
+    setSub("This window will close on its own");
+    $("progress").textContent = "";
+    setTimeout(() => tg.close(), 1600);
+  } else {
+    begin();                           // more ads required: one new request, still one ad at a time
+  }
 }
 
 $("retry").addEventListener("click", begin);
