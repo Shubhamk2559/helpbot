@@ -22,6 +22,8 @@ import db
 import userbot
 import monetag_engine as engine
 import monetag_store as mstore
+from ads import engine as ads_engine, routes as ads_routes, settings as ads_settings
+from ads.verify import Policy as AdsPolicy
 from config import (
     ADS_REQUIRED,
     AD_VERIFY_MODE,
@@ -168,6 +170,7 @@ if ROLE in ("worker", "both"):
             "showLog": MONETAG_SHOW_LOG,
             "required": ADS_REQUIRED,
             "blockNonValued": BLOCK_NON_VALUED,
+            "smart": ads_settings.SMART_ADS_ENABLED,   # multi-network flow (default off = legacy flow)
         }
     ).replace("</", "<\\/")
 
@@ -217,6 +220,31 @@ if ROLE in ("worker", "both"):
             return None
         c = (request.headers.get(MONETAG_GEO_HEADER) or "").strip().upper()
         return c if re.fullmatch(r"[A-Z]{2}", c) and c not in ("XX", "T1") else None
+
+    # ---- Smart multi-network rotation (Monetag + AdsGram + Tads). Only mounted when SMART_ADS_ENABLED=true ----
+    if ads_settings.SMART_ADS_ENABLED:
+        ads_routes.register(
+            app,
+            auth=_auth,
+            identify=_identify,
+            send_file=send_file,
+            db=db,
+            token_re=TOKEN_RE,
+            telegram_errors=(TelegramError,),
+            forbidden=(Forbidden,),
+            policy=AdsPolicy(
+                monetag_postback=(AD_VERIFY_MODE == "postback"),
+                min_seconds=MIN_AD_SECONDS,
+                wait_seconds=POSTBACK_WAIT_SECONDS,
+                block_non_valued=BLOCK_NON_VALUED,
+            ),
+            manager=manager,
+            ads_required=ADS_REQUIRED,
+            monetag_store=mstore,
+            select_zone=engine.select_zone,
+            sdk_url=engine.sdk_url,
+            country=_country,
+        )
 
     @app.post("/api/ad/start")
     async def ad_start(request: Request):
