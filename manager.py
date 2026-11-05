@@ -13,6 +13,7 @@ import db
 import handlers
 import monetag_engine
 import monetag_store
+from ads import engine as ads_engine, store as ads_store, settings as ads_settings
 from autoposter import panel as ap_panel
 from config import (
     AUTO_DELETE_SECONDS,
@@ -101,6 +102,11 @@ class BotManager:
             await monetag_store.init()
         except Exception:  # noqa: BLE001 — analytics indexes fail ho to bhi bot chalna chahiye
             log.exception("monetag index init failed")
+        if ads_settings.SMART_ADS_ENABLED:
+            try:
+                await ads_store.init()      # idempotent migration (new collections only)
+            except Exception:  # noqa: BLE001
+                log.exception("smart-ads migration failed")
         if ROLE in ("main", "both"):
             # Auto Posting (alag Mongo database). Fail ho to bhi HelpBot chalta rahe.
             if not await ap_panel.start():
@@ -131,11 +137,11 @@ class BotManager:
         await asyncio.gather(self.health_loop(), self._autoposter_loops())
 
     async def _worker_loops(self):
-        await asyncio.gather(self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop())
+        await asyncio.gather(self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop(), ads_engine.loop())
 
     async def _both_loops(self):
         await asyncio.gather(
-            self.health_loop(), self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop(), self._autoposter_loops()
+            self.health_loop(), self.sync_loop(), self.cleanup_loop(), monetag_engine.optimizer_loop(), ads_engine.loop(), self._autoposter_loops()
         )
 
     # ---------- auto-delete delivered files ----------
